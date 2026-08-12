@@ -32,7 +32,11 @@ class BacktestEngine:
                  max_splits: int = 5,
                  rebalance_freq: str = 'monthly',
                  margin_ratio: float = 0.20,
-                 borrowing_cost_annual: float = 0.02):
+                 borrowing_cost_annual: float = 0.02,
+                 stop_loss_method: str = 'pct',
+                 atr_period: int = 14,
+                 atr_mult: float = 2.5,
+                 max_gross: float = 1.0):
         self.initial_capital = initial_capital
         self.commission = commission
         self.slippage = slippage
@@ -43,6 +47,12 @@ class BacktestEngine:
         self.max_splits = max_splits
         self.rebalance_freq = rebalance_freq
         self._last_rebalance_month = None
+        self.stop_loss_method = stop_loss_method
+        self.atr_period = atr_period
+        self.atr_mult = atr_mult
+        self.max_gross = max_gross
+        self.shrinkage_alpha = shrinkage_alpha
+        self.max_weight = max_weight
 
         self.portfolio = PortfolioManager(
             initial_capital, max_position_size,
@@ -223,38 +233,65 @@ class BacktestEngine:
 
         self.pending_orders = remaining
 
+    def _get_atr(self, symbol: str, current_date: pd.Timestamp) -> float:
+        """计算 symbol 截至 current_date 的 ATR(用 BaseStrategy 静态方法)。"""
+        if symbol not in self.market_data:
+            return 0.0
+        df = self.market_data[symbol]
+        hist = df[df.index <= current_date]
+        if len(hist) < self.atr_period + 1:
+            return 0.0
+        atr = BaseStrategy.calculate_atr(hist['high'], hist['low'], hist['close'],
+                                         window=self.atr_period)
+        val = atr.iloc[-1]
+        return float(val) if pd.notna(val) and val > 0 else 0.0
+
     def _check_stop_losses(self, current_date: pd.Timestamp,
                            current_prices: Dict[str, float]):
-        """Check and execute trailing stop-losses for all positions
+        """Check and execute trailing stop-losses for all positions.
 
-        Long: stop triggers when price drops below (highest_price * (1 - stop_loss_pct))
-        Short: stop triggers when price rises above (lowest_price * (1 + stop_loss_pct))
+        - method='pct': 多头从最高价回撤 > stop_loss_pct 平仓;空头对称
+        - method='atr': 多头止损 = 最高价 - atr_mult*ATR;空头止损 = 最低价 + atr_mult*ATR
+          (ATR 自适应波动,波动大止损宽,避免被日常波动扫出)
         """
+        method = self.stop_loss_method
         stop_loss_pct = self.risk_manager.stop_loss_pct
 
         for pos_key, position in list(self.portfolio.positions.items()):
+            if position.symbol not in current_prices:
+                continue
+            cur_price = current_prices[position.symbol]
+
             if position.position_type == 'long':
                 reference_price = position.highest_price if position.highest_price > 0 else position.entry_price
-                drawdown_pct = (position.current_price - reference_price) / reference_price
-                if drawdown_pct < -stop_loss_pct:
-                    if position.symbol in current_prices:
-                        self.portfolio.close_position(
-                            position.symbol, position.quantity,
-                            current_prices[position.symbol], current_date,
-                            position_type='long',
-                            asset_type=position.asset_type
-                        )
+                if method == 'atr':
+                    atr = self._get_atr(position.symbol, current_date)
+                    if atr <= 0:
+                        continue
+                    stop_level = reference_price - self.atr_mult * atr
+                    trigger = cur_price < stop_level
+                else:
+                    drawdown_pct = (cur_price - reference_price) / reference_price
+                    trigger = drawdown_pct < -stop_loss_pct
+                if trigger:
+                    self.portfolio.close_position(
+                        position.symbol, position.quantity, cur_price, current_date,
+                        position_type='long', asset_type=position.asset_type)
             elif position.position_type == 'short':
                 reference_price = position.lowest_price if position.lowest_price < float('inf') else position.entry_price
-                rise_pct = (position.current_price - reference_price) / reference_price
-                if rise_pct > stop_loss_pct:
-                    if position.symbol in current_prices:
-                        self.portfolio.close_position(
-                            position.symbol, position.quantity,
-                            current_prices[position.symbol], current_date,
-                            position_type='short',
-                            asset_type=position.asset_type
-                        )
+                if method == 'atr':
+                    atr = self._get_atr(position.symbol, current_date)
+                    if atr <= 0:
+                        continue
+                    stop_level = reference_price + self.atr_mult * atr
+                    trigger = cur_price > stop_level
+                else:
+                    rise_pct = (cur_price - reference_price) / reference_price
+                    trigger = rise_pct > stop_loss_pct
+                if trigger:
+                    self.portfolio.close_position(
+                        position.symbol, position.quantity, cur_price, current_date,
+                        position_type='short', asset_type=position.asset_type)
 
     def _resolve_signal_conflicts(self, signals: List) -> List:
         """Resolve conflicting signals for the same symbol
@@ -432,6 +469,39 @@ class BacktestEngine:
                 )
             break
 
+    def _market_trend(self, current_date: pd.Timestamp) -> float:
+        """组合级市场趋势: 各股 60 日收益均值(>0 牛, <0 熊)。"""
+        trends = []
+        for symbol, df in self.market_data.items():
+            hist = df[df.index <= current_date]
+            if len(hist) >= 60:
+                trends.append(hist['close'].iloc[-1] / hist['close'].iloc[-60] - 1)
+        return float(np.mean(trends)) if trends else 0.0
+
+    def _target_gross(self, current_date: pd.Timestamp) -> float:
+        """波动率目标 + regime 总仓位 overlay。
+
+        - vol-target: gross = clip(target_vol/realized_vol, 0.3, max_gross)
+        - regime: 市场趋势 < -3%(明显下跌)时进一步压到 0.5; 低波牛允许到 max_gross
+        - 封顶 max_gross(=1.0, 无借贷); 数据不足返回 max_gross
+        """
+        equity_df = self.portfolio.get_equity_curve_df()
+        if len(equity_df) < 30:
+            return self.max_gross
+        returns = equity_df['total_value'].pct_change().dropna()
+        if len(returns) < 20:
+            return self.max_gross
+        realized_vol = returns.tail(60).std() * np.sqrt(252) if len(returns) >= 60 else returns.std() * np.sqrt(252)
+        if realized_vol <= 0:
+            return self.max_gross
+        target = self.risk_manager.target_portfolio_vol
+        gross = target / realized_vol
+        # regime overlay: 下跌市降仓
+        trend = self._market_trend(current_date)
+        if trend < -0.03:
+            gross = min(gross, 0.5)
+        return float(np.clip(gross, 0.3, self.max_gross))
+
     def _rebalance_portfolio(self, current_date: pd.Timestamp,
                              current_prices: Dict[str, float]):
         """Rebalance portfolio using risk parity or min variance weights (uses data up to current_date only)"""
@@ -462,13 +532,17 @@ class BacktestEngine:
             returns_df = returns_df.tail(60).dropna()
             if len(returns_df) >= 30:
                 target_weights = self.risk_manager.calculate_min_variance_weights(
-                    returns_df, max_weight=0.15,
-                    shrinkage_alpha=self.risk_manager.max_position_size
+                    returns_df, max_weight=self.max_weight,
+                    shrinkage_alpha=self.shrinkage_alpha
                 )
             else:
                 target_weights = self.risk_manager.calculate_risk_parity_weights(volatilities)
         else:
             return
+
+        # --- 波动率目标总仓位 overlay(封顶 max_gross, 无借贷) ---
+        gross = self._target_gross(current_date)
+        target_weights = {s: w * gross for s, w in target_weights.items()}
 
         current_weights = {}
         for symbol in symbols:
@@ -618,8 +692,14 @@ class BacktestEngine:
         """Get trade history DataFrame"""
         return self.portfolio.get_trade_history_df()
 
-    def plot_results(self):
-        """Plot backtest results"""
+    def plot_results(self, pause_sec: float = 5.0, save_path: str = None):
+        """Plot backtest results.
+
+        Args:
+            pause_sec: 图表显示 N 秒后自动关闭(默认 5s),避免 plt.show() 阻塞批量测试。
+                       传 0 则阻塞等待手动关闭(原行为)。
+            save_path: 若给定,同时把图存为文件(PNG)。
+        """
         import matplotlib.pyplot as plt
         import seaborn as sns
 
@@ -661,7 +741,15 @@ class BacktestEngine:
         axes[2].grid(True, alpha=0.3)
 
         plt.tight_layout()
-        plt.show()
+        if save_path:
+            plt.savefig(save_path, dpi=100, bbox_inches='tight')
+        if pause_sec and pause_sec > 0:
+            # 非阻塞显示 N 秒后自动关闭,便于批量测试自动推进
+            plt.show(block=False)
+            plt.pause(pause_sec)
+            plt.close('all')
+        else:
+            plt.show()
 
     def print_summary(self):
         """Print backtest summary"""

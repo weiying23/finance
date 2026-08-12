@@ -3,16 +3,21 @@
 ## 运行系统
 
 ```bash
-# 离线测试务必加 --sample-data（akshare 需网络，可能连接失败）
+# 离线测试加 --sample-data：走 SampleDataSource，不联网、不依赖任何数据后端库
 python main.py --strategy momentum --sample-data
 python main.py --strategy stat_arb --symbols 600519 --start 2022-01-01 --end 2022-12-31 --sample-data
 python main.py --strategy pairs_trading --sample-data
 python main.py --strategy momentum --walk-forward --sample-data
 
+# 真实数据：去掉 --sample-data，按 config.DATA_CONFIG['data_source'] 取后端
+#   akshare(默认,爬虫,需联网) | tushare(需token) | baostock(免注册,自有TCP协议) | yfinance(美股)
+python main.py --strategy momentum
+python main.py --strategy pairs_trading --symbols 600519 000858 --start 2022-01-01 --end 2023-12-31
+
 # 可用策略：momentum, mean_reversion, multi_asset, multi_factor, stat_arb, regime, pairs_trading, all, alpha_all
 python main.py --strategy <name> [--symbols ...] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--capital N] [--no-hedging] [--sample-data] [--walk-forward]
 
-# 市场环境选择（sample-data模式）
+# 市场环境选择（仅 --sample-data 模式生效）
 python main.py --strategy momentum --sample-data --market-regime bull
 python main.py --strategy all --sample-data --market-regime sideways
 
@@ -24,7 +29,7 @@ python run_all_regimes.py
 
 - `main.py` — CLI 入口，从 `config.py` 加载所有策略/风控/回测/组合优化/执行参数
 - `config.py` — 参数、股票池、回测周期的唯一来源。**改参数改这里，不要改策略构造函数**
-- `qcode/data/fetcher.py` — 通过 akshare 获取A股数据（主数据源）；`us_fetcher.py` 存在但**未接入引擎**
+- `qcode/data/` — **可插拔数据源层**：`base.py` 定义 `DataSource` ABC（+共享缓存/多股循环/IV），`factory.py` 的 `create_data_source()` 按 `DATA_CONFIG['data_source']` 选 adapter，`sample_source.py` 提供离线样本数据（4种市场环境，无网络无依赖）。adapter：`akshare_source.py`（默认A股，延迟导入+retry/proxy）、`tushare_source.py`（Pro API，需token）、`baostock_source.py`（免注册）、`yfinance_source.py`（美股/全球，含期权链，替代旧 `USDataFetcher`）。`fetcher.py`/`us_fetcher.py` 现为兼容 shim，保留旧导入路径。**所有后端库延迟导入**，`--sample-data` 不依赖任何后端
 - `qcode/strategies/base.py` — 抽象基类 + Signal/SignalType 数据类。`OPEN_SHORT` 和 `CLOSE_SHORT` 信号类型用于做空
 - `qcode/strategies/pairs_trading.py` — 新增协整配对交易策略，品种对从 config 预设
 - `qcode/backtest/engine.py` — 总调度：执行pending_orders → 止损检查 → 策略信号(含冲突协调) → 组合波动率约束 → 再平衡(risk_parity/min_variance) → Delta对冲
@@ -47,7 +52,8 @@ python run_all_regimes.py
 - **局部RandomState**：`_generate_sample_data` 用 `np.random.RandomState` 替代 `np.random.seed`
 - **Walk-forward验证**：`--walk-forward` 选项分段回测，比较各段表现稳定性
 - **协整配对交易**：`PairsTradingStrategy` 基于预设品种对做协整检验+残差Z-score交易
-- **市场环境参数**：`--market-regime bear/bull/sideways/mixed` 选择样本数据的市场环境，`DataFetcher.__init__` 和 `BacktestEngine.__init__` 传入 `market_regime`
+- **可插拔数据源**：`create_data_source()` 工厂按 `DATA_CONFIG['data_source']` 选 adapter（akshare/tushare/baostock/yfinance），`--sample-data` 优先走 `SampleDataSource`（不联网）。所有后端库延迟导入，缺库时优雅降级返回空 DataFrame。`DataFetcher` 为兼容工厂，仍读 config
+- **市场环境参数**：`--market-regime bear/bull/sideways/mixed` 选择样本数据的市场环境（**仅 `--sample-data` 模式生效**）。`market_regime` 经 `BacktestEngine.__init__` 传入工厂
 - **NaN confidence防护**：`risk_manager.calculate_position_size` 中 confidence为NaN时默认1.0，避免regime策略在lookback期内触发ValueError
 - **做空机制修正**：
   - 开空仓：`cash += proceeds - margin`（卖出收到资金，冻结保证金），而非旧版 `cash -= cost`
@@ -106,6 +112,7 @@ python run_all_regimes.py
 - `SHORT_CONFIG` — 做空配置（`margin_ratio`: 0.20, `borrowing_cost_annual`: 0.02）
 - `PAIRS_TRADING_STRATEGY` — 配对交易参数和预设品种对列表
 - `WALK_FORWARD_CONFIG` — Walk-forward分段参数
+- `DATA_CONFIG` — 数据源（`data_source`: akshare/tushare/baostock/yfinance，`tushare_token`；`--sample-data` 时忽略）
 
 ## 没有测试
 
@@ -117,4 +124,11 @@ python run_all_regimes.py
 
 ## 依赖
 
-新增 `statsmodels>=0.13.0`（用于协整检验），其余依赖不变。
+核心依赖见 `requirements.txt`（pandas/numpy/scipy/statsmodels/matplotlib/seaborn/tqdm）。数据后端（akshare/tushare/baostock/yfinance）均为**延迟导入**、按需安装：只用 `--sample-data` 可不装任何后端；用 tushare 需 `pip install tushare` + token；用 baostock 需 `pip install baostock`。`statsmodels>=0.13.0` 用于协整检验。
+
+## 数据源联网说明
+
+- **akshare**：走 requests 爬取 sina/eastmoney，受系统/环境代理影响。若本机设了 HTTP 代理且对国内域名判为"直连"而直连又不通，会报 `ProxyError`/`RemoteDisconnected`。修法：代理规则里把 `eastmoney.com` 设为代理，或关掉系统代理。
+- **baostock**：走自有 TCP 协议直连 baostock 服务器，不经 HTTP 代理，常能在 akshare 失败时可用（免注册）。当前 `config.DATA_CONFIG['data_source']` 即设为 `baostock`。
+- **tushare**：Pro API，稳定，需 token（免费注册）。
+- **yfinance**：美股/全球，走 requests，同样受代理影响。

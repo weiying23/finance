@@ -47,6 +47,7 @@ logs/
 
 # Data cache
 cache/
+.data_cache/
 
 # 注:qcode/qcode/data 为数据获取源码模块(DataFetcher 等),需纳入版本控制,
 # 故不再使用 data/ 通配规则。如未来新增纯数据缓存目录,请用具体路径忽略。

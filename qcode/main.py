@@ -55,7 +55,11 @@ def run_backtest(strategy_name: str, symbols: list, start_date: str, end_date: s
         max_splits=EXECUTION_CONFIG['max_splits'],
         rebalance_freq=PORTFOLIO_OPTIMIZATION.get('rebalance_freq', 'monthly'),
         margin_ratio=SHORT_CONFIG['margin_ratio'],
-        borrowing_cost_annual=SHORT_CONFIG['borrowing_cost_annual']
+        borrowing_cost_annual=SHORT_CONFIG['borrowing_cost_annual'],
+        stop_loss_method=RISK_CONFIG.get('stop_loss_method', 'pct'),
+        atr_period=RISK_CONFIG.get('atr_period', 14),
+        atr_mult=RISK_CONFIG.get('atr_mult', 2.5),
+        max_gross=RISK_CONFIG.get('max_gross', 1.0)
     )
 
     if strategy_name.lower() == 'momentum':

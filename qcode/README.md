@@ -4,7 +4,7 @@ A comprehensive quantitative trading framework built with Python, featuring mult
 
 ## Features
 
-- **Data Integration**: Seamless integration with akshare for fetching Chinese market data (stocks, options, futures)
+- **Data Integration**: Pluggable data sources — akshare / tushare / baostock (A-share) and yfinance (US/global), selected via `config.DATA_CONFIG['data_source']`; all backends lazily imported, with offline `--sample-data` mode requiring no network
 - **Strategy Framework**: Extensible base classes for creating custom trading strategies
 - **Multi-Asset Support**: Trade stocks, options, and derivatives simultaneously
 - **Delta Hedging**: Automatic portfolio delta neutralization for risk management
@@ -61,7 +61,16 @@ pip install -r requirements.txt
   ├── config.py                    # Configuration file
   ├── main.py                      # CLI entry point
   ├── qcode/
-  │   ├── data/fetcher.py         # akshare integration
+  │   ├── data/                    # Pluggable data sources (lazy-imported backends)
+  │   │   ├── base.py             # DataSource ABC + shared cache/multi-stock/IV
+  │   │   ├── factory.py          # create_data_source() + DataFetcher compat
+  │   │   ├── sample_source.py    # Offline sample data (4 regimes, no deps)
+  │   │   ├── akshare_source.py   # A-share via akshare (default)
+  │   │   ├── tushare_source.py   # A-share via tushare Pro (token)
+  │   │   ├── baostock_source.py  # A-share via baostock (no token)
+  │   │   ├── yfinance_source.py  # US/global via yfinance
+  │   │   ├── fetcher.py          # Backward-compat shim
+  │   │   └── us_fetcher.py      # Backward-compat shim
   │   ├── strategies/             # Strategy implementations
   │   │   ├── base.py             # Base classes
   │   │   ├── momentum.py         # Momentum strategy
@@ -136,8 +145,16 @@ engine.add_strategy(strategy)
 
 ```
 qcode/
-├── data/           # Data fetching and management
-│   └── fetcher.py   # akshare integration
+├── data/           # Pluggable data sources (backends lazy-imported)
+│   ├── base.py             # DataSource ABC + shared cache/multi-stock/IV
+│   ├── factory.py          # create_data_source() + DataFetcher compat
+│   ├── sample_source.py    # Offline sample data (4 market regimes)
+│   ├── akshare_source.py   # A-share via akshare (default)
+│   ├── tushare_source.py   # A-share via tushare Pro (token)
+│   ├── baostock_source.py  # A-share via baostock (no token)
+│   ├── yfinance_source.py  # US/global via yfinance
+│   ├── fetcher.py          # Backward-compat shim
+│   └── us_fetcher.py      # Backward-compat shim
 ├── strategies/    # Trading strategies
 │   ├── base.py            # Base strategy class
 │   ├── momentum.py        # Momentum strategy
@@ -264,11 +281,16 @@ python examples/multi_asset_backtest.py
 
 ### Data Sources
 
-The framework uses akshare to fetch:
-- **Stocks**: A-share daily OHLCV data with adjustments
-- **Indices**: Major Chinese indices (SSE, SZSE, etc.)
-- **Options**: Option chain data for supported underlyings
-- **Futures**: Commodity and financial futures
+The framework supports pluggable data backends selected via `config.DATA_CONFIG['data_source']`:
+
+| Source | Coverage | Token | Notes |
+|--------|----------|-------|-------|
+| `akshare` (default) | A-share stocks, indices, options, futures | No | Web scraping of sina/eastmoney; subject to network/proxy |
+| `tushare` | A-share stocks, indices, futures, financials | Yes (free) | Pro API, stable; set `DATA_CONFIG['tushare_token']` or `TUSHARE_TOKEN` env |
+| `baostock` | A-share stocks, indices | No | Own TCP protocol (bypasses HTTP proxy), good fallback when akshare fails |
+| `yfinance` | US/global stocks, options | No | Yahoo Finance |
+
+All backends are **lazily imported** — `import qcode` works without any backend installed. Use `--sample-data` for offline testing (zero network/deps). Each adapter normalizes output to a DataFrame indexed by `date` with `open/high/low/close/volume`.
 
 ## Configuration
 
