@@ -1,447 +1,200 @@
-# QCode - Quantitative Trading System Framework
+# QCode - 量化交易回测框架
 
-A comprehensive quantitative trading framework built with Python, featuring multi-asset support, delta hedging, and advanced risk management.
+基于 Python 的 A 股量化交易回测框架:可插拔数据源、7 种内置策略、多资产多空、ATR 止损 + 波动率目标仓位 + regime 自适应的风控引擎。
 
-## Features
+> 仅供学习研究,非投资建议。历史表现不代表未来收益。
 
-- **Data Integration**: Pluggable data sources — akshare / tushare / baostock (A-share) and yfinance (US/global), selected via `config.DATA_CONFIG['data_source']`; all backends lazily imported, with offline `--sample-data` mode requiring no network
-- **Strategy Framework**: Extensible base classes for creating custom trading strategies
-- **Multi-Asset Support**: Trade stocks, options, and derivatives simultaneously
-- **Delta Hedging**: Automatic portfolio delta neutralization for risk management
-- **Portfolio Management**: Track positions, P&L, and performance metrics
-- **Risk Management**: Position sizing, VaR calculation, Greeks computation
-- **Backtesting Engine**: High-performance backtesting with realistic transaction costs
-- **Performance Analytics**: Comprehensive metrics including Sharpe ratio, max drawdown, win rate
+## 核心特性
 
-## Installation
+- **可插拔数据源**:akshare / tushare / baostock(A 股)+ yfinance(美股/全球),通过 `config.DATA_CONFIG['data_source']` 切换;所有后端**延迟导入**,`--sample-data` 离线模式无需联网、不依赖任何数据后端库
+- **7 种策略**:动量、均值回归、多资产(含期权对冲)、多因子、统计套利、市场环境自适应、协整配对交易
+- **做空支持**:多空仓位独立记账(保证金 20% + 融券成本),`OPEN_SHORT`/`CLOSE_SHORT` 信号语义明确
+- **风控引擎**:ATR 自适应止损、波动率目标总仓位(封顶无杠杆)、regime 仓位 overlay、VaR/CVaR 减仓、月度 min_variance 再平衡
+- **组合优化**:风险平价、Ledoit-Wolf 收缩 + 最小方差(SLSQP)
+- **性能分析**:Sharpe、最大回撤、胜率、年化、VaR/CVaR,并对照等权买入持有基准
+- **数据缓存**:内存 + 磁盘(`.data_cache/`)双层缓存,50-100 只标的重复跑免重拉
 
-1. Clone the repository:
+## 安装
+
 ```bash
-git clone <repository-url>
-cd qcode
+git clone https://github.com/weiying23/finance.git
+cd finance/qcode
+pip install -r requirements.txt   # pandas/numpy/scipy/statsmodels/matplotlib/seaborn/tqdm
 ```
 
-2. Install dependencies:
+数据后端按需安装(延迟导入,缺库优雅降级):
 ```bash
-pip install -r requirements.txt
+pip install akshare      # 默认 A 股后端(爬虫)
+pip install baostock     # 免注册,自有 TCP 协议(akshare 失败时的可靠替代)
+pip install tushare      # Pro API(需 token)
+pip install yfinance     # 美股/全球
 ```
 
-## Quick Start
- ### Usage Examples
+只用 `--sample-data` 离线测试可不装任何后端。
 
-  Quick Start:
+## 快速开始
 
-  # Run a simple momentum backtest
-  python main.py --strategy momentum
+### CLI
 
-  # Multi-asset with delta hedging
-  python main.py --strategy multi_asset --capital 2000000
+```bash
+# 离线测试(走 SampleDataSource,不联网)
+python main.py --strategy momentum --sample-data
+python main.py --strategy pairs_trading --sample-data
+python main.py --strategy momentum --walk-forward --sample-data
 
-  # Run all strategies
-  python main.py --strategy all
+# 真实数据:去掉 --sample-data,按 config.DATA_CONFIG['data_source'] 取后端
+python main.py --strategy momentum
+python main.py --strategy pairs_trading --symbols 600519 000858 --start 2022-01-01 --end 2023-12-31
 
-  Python API:
+# 市场环境选择(仅 --sample-data 模式生效)
+python main.py --strategy momentum --sample-data --market-regime bull
 
-  from qcode import BacktestEngine
-  from qcode.strategies.momentum import MomentumStrategy
+# 可用策略:momentum, mean_reversion, multi_asset, multi_factor, stat_arb, regime, pairs_trading, all, alpha_all
+python main.py --strategy <name> [--symbols ...] [--start YYYY-MM-DD] [--end YYYY-MM-DD] \
+                          [--capital N] [--no-hedging] [--sample-data] [--walk-forward]
+```
 
-  engine = BacktestEngine(initial_capital=1000000, enable_delta_hedging=True)
-  engine.add_strategy(MomentumStrategy(fast_period=10, slow_period=30))
-  engine.load_data(['600519', '000858'], '2022-01-01', '2023-12-31')
-  results = engine.run()
-  engine.print_summary()
-
-  ### Files Created
-
-  qcode/
-  ├── README.md                    # Comprehensive documentation
-  ├── QUICKSTART.md                # 5-minute getting started guide
-  ├── requirements.txt             # Dependencies
-  ├── setup.py                     # Package installation
-  ├── config.py                    # Configuration file
-  ├── main.py                      # CLI entry point
-  ├── qcode/
-  │   ├── data/                    # Pluggable data sources (lazy-imported backends)
-  │   │   ├── base.py             # DataSource ABC + shared cache/multi-stock/IV
-  │   │   ├── factory.py          # create_data_source() + DataFetcher compat
-  │   │   ├── sample_source.py    # Offline sample data (4 regimes, no deps)
-  │   │   ├── akshare_source.py   # A-share via akshare (default)
-  │   │   ├── tushare_source.py   # A-share via tushare Pro (token)
-  │   │   ├── baostock_source.py  # A-share via baostock (no token)
-  │   │   ├── yfinance_source.py  # US/global via yfinance
-  │   │   ├── fetcher.py          # Backward-compat shim
-  │   │   └── us_fetcher.py      # Backward-compat shim
-  │   ├── strategies/             # Strategy implementations
-  │   │   ├── base.py             # Base classes
-  │   │   ├── momentum.py         # Momentum strategy
-  │   │   ├── mean_reversion.py  # Mean reversion
-  │   │   └── multi_asset.py     # Multi-asset with hedging
-  │   ├── portfolio/manager.py    # Portfolio management
-  │   ├── risk/manager.py         # Risk & delta hedging
-  │   ├── backtest/engine.py      # Backtesting engine
-  │   └── utils/metrics.py        # Performance metrics
-  └── examples/
-      ├── simple_backtest.py      # Basic example
-      ├── multi_asset_backtest.py # Advanced example
-      ├── strategy_optimization.py # Parameter tuning
-      └── results_dashboard.py    # Visualization dashboard
-
-### Simple Momentum Strategy Backtest
+### Python API
 
 ```python
 from qcode import BacktestEngine
 from qcode.strategies.momentum import MomentumStrategy
 
-# Initialize backtest engine
-engine = BacktestEngine(
-    initial_capital=1000000,
-    commission=0.0003,
-    slippage=0.0001
-)
-
-# Add momentum strategy
-strategy = MomentumStrategy(
-    fast_period=10,
-    slow_period=30,
-    rsi_period=14
-)
-engine.add_strategy(strategy)
-
-# Load data
-symbols = ['600519', '000858', '600036']
-engine.load_data(symbols, '2022-01-01', '2023-12-31')
-
-# Run backtest
+engine = BacktestEngine(initial_capital=1000000)
+engine.add_strategy(MomentumStrategy(fast_period=10, slow_period=30))
+engine.load_data(['600519', '000858'], '2022-01-01', '2023-12-31')
 results = engine.run()
 engine.print_summary()
-engine.plot_results()
+engine.plot_results()            # 默认显示 5 秒自动关闭(传 pause_sec=0 阻塞, save_path= 存图)
 ```
 
-### Multi-Asset Strategy with Delta Hedging
+## 内置策略
 
-```python
-from qcode import BacktestEngine
-from qcode.strategies.multi_asset import MultiAssetStrategy
+| 策略 | 原理 | 关键参数(config.py) |
+|------|------|----------------------|
+| `momentum` | 快慢 SMA 交叉 + RSI 超买超卖 | fast 10 / slow 30 / rsi 14 |
+| `mean_reversion` | 布林带触轨回归 | bb 20 / std 2.0 |
+| `multi_asset` | 趋势强度 + MACD,高波动附期权对冲 | trend 20 / hedge 0.15 |
+| `multi_factor` | 动量/价值/波动率/成交量四因子加权 | 权重 0.4/0.3/0.2/0.1 |
+| `stat_arb` | 滚动均值±标准差 Z-score | lookback 60 / entry 2.0 / exit 0.5 |
+| `regime` | 按 60 日趋势+波动率识别 5 种市场状态 | regime_lookback 60 |
+| `pairs_trading` | 预设品种对协整检验 + 残差 Z-score | lookback 60 / entry 2.0 |
 
-# Enable delta hedging
-engine = BacktestEngine(
-    initial_capital=2000000,
-    enable_delta_hedging=True
-)
+信号类型:`BUY`/`SELL`(仅平多)/`OPEN_SHORT`/`CLOSE_SHORT`/`CLOSE_LONG`,以及期权 `BUY_CALL`/`SELL_CALL`/`BUY_PUT`/`SELL_PUT`。
 
-# Add multi-asset strategy
-strategy = MultiAssetStrategy(
-    trend_period=20,
-    hedge_threshold=0.15
-)
-engine.add_strategy(strategy)
+## 数据源
 
-# Run backtest...
-```
+通过 `config.py` 的 `DATA_CONFIG` 切换:
 
-## Architecture
+| 源 | 覆盖 | 需 token | 说明 |
+|----|------|---------|------|
+| `akshare`(默认) | A 股股/指数/期权/期货 | 否 | 爬取 sina/eastmoney,受系统代理影响 |
+| `baostock` | A 股股/指数 | 否 | **自有 TCP 协议,绕开 HTTP 代理**,akshare 失败时的可靠替代 |
+| `tushare` | A 股股/指数/期货/财务 | 是(免费注册) | Pro API 稳定;设 `DATA_CONFIG['tushare_token']` 或环境变量 `TUSHARE_TOKEN` |
+| `yfinance` | 美股/全球,含期权链 | 否 | 走 requests,受代理影响 |
 
-### Core Modules
+所有 adapter 输出统一 schema:日期索引 + `open/high/low/close/volume`(及 amount/pct_change/turnover 等)。
 
-```
-qcode/
-├── data/           # Pluggable data sources (backends lazy-imported)
-│   ├── base.py             # DataSource ABC + shared cache/multi-stock/IV
-│   ├── factory.py          # create_data_source() + DataFetcher compat
-│   ├── sample_source.py    # Offline sample data (4 market regimes)
-│   ├── akshare_source.py   # A-share via akshare (default)
-│   ├── tushare_source.py   # A-share via tushare Pro (token)
-│   ├── baostock_source.py  # A-share via baostock (no token)
-│   ├── yfinance_source.py  # US/global via yfinance
-│   ├── fetcher.py          # Backward-compat shim
-│   └── us_fetcher.py      # Backward-compat shim
-├── strategies/    # Trading strategies
-│   ├── base.py            # Base strategy class
-│   ├── momentum.py        # Momentum strategy
-│   ├── mean_reversion.py  # Mean reversion strategy
-│   └── multi_asset.py     # Multi-asset strategy
-├── portfolio/     # Portfolio management
-│   └── manager.py   # Position tracking and P&L
-├── risk/          # Risk management
-│   └── manager.py   # Greeks, VaR, delta hedging
-├── backtest/      # Backtesting engine
-│   └── engine.py    # Main backtest logic
-└── utils/         # Utilities
-    └── metrics.py   # Performance metrics
-```
+**无前视选池**:`qcode/data/universe.py` 的 `select_liquidity_universe(as_of, lookback_days=60)` 按回测起点前 N 日成交额选 top-50,消除幸存者/前视偏差。
 
-## Creating Custom Strategies
+**联网说明**:本机若设了 HTTP 代理且对国内域名判为"直连"而直连又不通,akshare/yfinance 会报 `ProxyError`/`RemoteDisconnected`。修法:代理规则里把 `eastmoney.com`/`github.com` 设为代理,或用 baostock(不经 HTTP 代理)。
 
-Extend the `BaseStrategy` class to create your own strategies:
+## 配置
+
+所有参数集中在 `config.py`(**改参数改这里,不要改策略构造函数**):
+
+| 配置段 | 作用 |
+|--------|------|
+| `BACKTEST_CONFIG` | 初始资金、佣金、滑点、Delta 对冲开关 |
+| `RISK_CONFIG` | 仓位上限、止损(ATR/百分比)、波动率目标、总杠杆封顶 |
+| `PORTFOLIO_OPTIMIZATION` | 再平衡方法(min_variance)、max_weight、再平衡频率 |
+| `EXECUTION_CONFIG` | 拆单(单笔上限、最大拆分) |
+| `SHORT_CONFIG` | 做空保证金比例、融券成本 |
+| `DATA_CONFIG` | 数据源、tushare token |
+| `STOCK_UNIVERSE` | 50 只标的池(沪深 300 按流动性前 50) |
+| `*_STRATEGY` | 各策略参数 |
+
+### 风控引擎(Phase 1 改进)
+
+针对"策略本质是低 beta 保险、牛市跑输持有"的发现做的改进:
+
+- **ATR 止损**(`stop_loss_method='atr'`,`atr_mult=2.5`):止损 = 最高价 − k×ATR,自适应波动,避免固定 5% 被日常波动扫损
+- **波动率目标总仓位**(`target_portfolio_vol=0.15`,`max_gross=1.0`):`gross = clip(target_vol/realized_vol, 0.3, 1.0)`,封顶无借贷,低波满仓、高波降仓持现金
+- **regime overlay**:市场趋势 < −3% 时进一步压仓到 0.5
+- **min_variance 再平衡**:Ledoit-Wolf 收缩 + SLSQP 最小方差(替代反动量的 risk_parity)
+- **VaR 减仓**:组合 VaR 超标时自动缩减最大持仓
+
+## 自定义策略
+
+继承 `BaseStrategy`,实现 `calculate_indicators` + `generate_signals`:
 
 ```python
 from qcode.strategies.base import BaseStrategy, Signal, SignalType
 import pandas as pd
 
 class MyStrategy(BaseStrategy):
-    def __init__(self, param1=10, param2=20):
-        params = {'param1': param1, 'param2': param2}
-        super().__init__("MyStrategy", params)
-    
+    def __init__(self, period=20):
+        super().__init__("MyStrategy", {'period': period})
+
     def calculate_indicators(self, data: pd.DataFrame) -> pd.DataFrame:
-        # Add your indicators
         df = data.copy()
-        df['sma'] = self.calculate_sma(df['close'], self.params['param1'])
+        df['sma'] = self.calculate_sma(df['close'], self.params['period'])
         return df
-    
+
     def generate_signals(self, data: dict) -> list:
         signals = []
         for symbol, df in data.items():
             df = self.calculate_indicators(df)
-            current = df.iloc[-1]
-            
-            # Your signal logic
-            if current['close'] > current['sma']:
-                signals.append(Signal(
-                    timestamp=current.name,
-                    symbol=symbol,
-                    signal_type=SignalType.BUY,
-                    quantity=0,
-                    price=current['close']
-                ))
+            cur = df.iloc[-1]
+            if cur['close'] > cur['sma']:
+                signals.append(Signal(cur.name, symbol, SignalType.BUY, 0, cur['close']))
         return signals
 ```
 
-## Built-in Strategies
+`BaseStrategy` 提供静态指标方法:`calculate_sma / ema / rsi / bollinger_bands / macd / atr`。
 
-### 1. Momentum Strategy
-Uses moving average crossovers and RSI to identify trending opportunities.
-
-**Parameters:**
-- `fast_period`: Fast MA period (default: 10)
-- `slow_period`: Slow MA period (default: 30)
-- `rsi_period`: RSI period (default: 14)
-- `rsi_oversold`: RSI oversold level (default: 30)
-- `rsi_overbought`: RSI overbought level (default: 70)
-
-### 2. Mean Reversion Strategy
-Trades based on Bollinger Bands mean reversion.
-
-**Parameters:**
-- `bb_period`: Bollinger Bands period (default: 20)
-- `bb_std`: Standard deviation multiplier (default: 2.0)
-- `lookback`: Lookback period (default: 5)
-
-### 3. Multi-Asset Strategy
-Combines stocks with options for hedging based on volatility.
-
-**Parameters:**
-- `trend_period`: Trend identification period (default: 20)
-- `volatility_period`: Volatility calculation period (default: 20)
-- `hedge_threshold`: Volatility threshold for hedging (default: 0.15)
-
-## Risk Management
-
-### Position Sizing
-Automatically calculates optimal position sizes based on:
-- Maximum position size (% of portfolio)
-- Risk per trade (stop-loss based)
-- Kelly Criterion optimization
-
-### Delta Hedging
-Automatically neutralizes portfolio delta by:
-1. Calculating portfolio-level delta from all positions
-2. Identifying required hedge quantity
-3. Executing hedge trades in underlying assets
-
-### Greeks Calculation
-Supports full Black-Scholes Greeks for options:
-- Delta: Price sensitivity
-- Gamma: Delta sensitivity
-- Theta: Time decay
-- Vega: Volatility sensitivity
-- Rho: Interest rate sensitivity
-
-## Performance Metrics
-
-The framework calculates comprehensive performance metrics:
-
-- **Returns**: Total, annualized, daily average
-- **Risk**: Volatility, max drawdown, VaR, CVaR
-- **Risk-adjusted**: Sharpe ratio, Sortino ratio, Calmar ratio
-- **Trading**: Win rate, profit factor, number of trades
-- **Portfolio**: Cash, positions value, total value
-
-## Examples
-
-### Running Examples
-
-```bash
-# Simple momentum backtest
-python examples/simple_backtest.py
-
-# Multi-asset strategy with delta hedging
-python examples/multi_asset_backtest.py
-```
-
-### Data Sources
-
-The framework supports pluggable data backends selected via `config.DATA_CONFIG['data_source']`:
-
-| Source | Coverage | Token | Notes |
-|--------|----------|-------|-------|
-| `akshare` (default) | A-share stocks, indices, options, futures | No | Web scraping of sina/eastmoney; subject to network/proxy |
-| `tushare` | A-share stocks, indices, futures, financials | Yes (free) | Pro API, stable; set `DATA_CONFIG['tushare_token']` or `TUSHARE_TOKEN` env |
-| `baostock` | A-share stocks, indices | No | Own TCP protocol (bypasses HTTP proxy), good fallback when akshare fails |
-| `yfinance` | US/global stocks, options | No | Yahoo Finance |
-
-All backends are **lazily imported** — `import qcode` works without any backend installed. Use `--sample-data` for offline testing (zero network/deps). Each adapter normalizes output to a DataFrame indexed by `date` with `open/high/low/close/volume`.
-
-## Configuration
-
-### Backtest Engine Parameters
+## 可视化与导出
 
 ```python
-engine = BacktestEngine(
-    initial_capital=1000000,      # Starting capital
-    commission=0.0003,            # Commission rate (0.03%)
-    slippage=0.0001,              # Slippage rate (0.01%)
-    enable_delta_hedging=True     # Enable delta hedging
-)
+engine.plot_results(pause_sec=5, save_path='equity.png')   # 5 秒自动关闭
+equity_df = engine.get_equity_curve()      # 净值曲线 DataFrame
+trade_df  = engine.get_trade_history()     # 交易记录 DataFrame
+equity_df.to_csv('equity.csv', index=False)
 ```
 
-### Risk Manager Parameters
+## 回测结果文档
 
-```python
-from qcode.risk.manager import RiskManager
+跨市场(熊/震荡/牛)对比 + Phase 1 改进的真实数据回测结论,见项目根目录:
 
-risk_mgr = RiskManager(
-    max_position_size=0.1,        # Max 10% per position
-    max_portfolio_var=0.02,       # Max 2% VaR
-    risk_free_rate=0.03           # 3% risk-free rate
-)
+- [熊市策略回测结果.md](熊市策略回测结果.md) — 2022-2023(10 只白马,逐股 + 暴跌保险拆解)
+- [牛市策略回测结果.md](牛市策略回测结果.md) — 2019-2020
+- [震荡市策略回测结果.md](震荡市策略回测结果.md) — 2021
+- [跨市场对比.md](跨市场对比.md) — 三段合成:策略本质是"低 beta 暴跌保险"
+- [Phase1改进结果.md](Phase1改进结果.md) — ATR止损/波动率目标/regime overlay + 50 只池改进;multi_asset 三段全转正,但牛市闸门(-100pp)未过,按约定停手不上 Phase 3
+
+## 项目结构
+
 ```
-
-## Advanced Usage
-
-### Combining Multiple Strategies
-
-```python
-engine = BacktestEngine(initial_capital=2000000)
-
-# Add multiple strategies
-engine.add_strategy(MomentumStrategy())
-engine.add_strategy(MeanReversionStrategy())
-engine.add_strategy(MultiAssetStrategy())
-
-# They will all generate signals
-results = engine.run()
+qcode/
+├── main.py                  # CLI 入口
+├── config.py                # 所有参数(策略/风控/回测/数据源)
+├── requirements.txt
+├── qcode/                   # 包
+│   ├── data/                # 可插拔数据源(后端延迟导入)
+│   │   ├── base.py          # DataSource ABC + 内存/磁盘缓存 + IV
+│   │   ├── factory.py       # create_data_source() + DataFetcher 兼容工厂
+│   │   ├── sample_source.py # 离线样本数据(4 种市场环境)
+│   │   ├── akshare_source.py / tushare_source.py / baostock_source.py / yfinance_source.py
+│   │   ├── universe.py      # 无前视流动性选池
+│   │   ├── fetcher.py / us_fetcher.py   # 兼容 shim
+│   ├── strategies/          # base / momentum / mean_reversion / multi_asset / alpha_mining(多因子+统计套利+regime) / pairs_trading
+│   ├── portfolio/manager.py # 持仓记账(多空独立 + 保证金 + 融券成本)
+│   ├── risk/manager.py      # 仓位/风险平价/最小方差/Greeks/VaR
+│   ├── backtest/engine.py   # 回测引擎总调度
+│   └── utils/               # metrics / significance(IC 检验)
+└── examples/                # simple_backtest / multi_asset_backtest / strategy_optimization / results_dashboard
 ```
-
-### Custom Risk Management
-
-```python
-from qcode.risk.manager import RiskManager
-
-risk_mgr = RiskManager(max_position_size=0.05)
-
-# Calculate position size
-size = risk_mgr.calculate_position_size(
-    portfolio_value=1000000,
-    entry_price=50.0,
-    stop_loss_pct=0.02
-)
-
-# Calculate Greeks
-greeks = risk_mgr.calculate_option_greeks(
-    spot=50.0,
-    strike=55.0,
-    time_to_maturity=0.25,
-    volatility=0.3,
-    option_type='call'
-)
-```
-
-## Visualization
-
-The framework provides built-in visualization:
-
-```python
-# Plot backtest results
-engine.plot_results()
-
-# Or use custom plotting
-from qcode.utils.metrics import plot_equity_curve
-
-equity_df = engine.get_equity_curve()
-plot_equity_curve(equity_df, initial_capital=1000000, save_path='results.png')
-```
-
-## Export Results
-
-```python
-# Get results as DataFrames
-equity_df = engine.get_equity_curve()
-trade_df = engine.get_trade_history()
-
-# Export to CSV
-equity_df.to_csv('equity_curve.csv', index=False)
-trade_df.to_csv('trades.csv', index=False)
-```
-
-## Multi-Regime Backtest Results (Trailing Stop 5%)
-
-Test conditions: sample data, 2022-01 to 2023-12, 10 stocks, initial capital 1M, trailing stop-loss 5% from highest price.
-
-### Returns (%)
-
-| Strategy | bear | bull | sideways | mixed |
-|----------|------|------|----------|-------|
-| momentum | -12.25 | +12.82 | -4.65 | -2.50 |
-| mean_reversion | -5.48 | +2.02 | +5.05 | -2.74 |
-| **multi_asset** | **+0.66** | +5.30 | +0.10 | +5.99 |
-| multi_factor | -11.49 | +4.89 | +3.91 | +19.75 |
-| stat_arb | -32.66 | +19.74 | +4.07 | +21.37 |
-| regime | -12.79 | +5.49 | +1.57 | +9.08 |
-| pairs_trading | -28.97 | +24.18 | -3.42 | +5.18 |
-
-### Sharpe Ratios
-
-Sharpe = (R_p - R_f) / σ_p, annualized as √252 × mean(returns) / std(returns)
-
-| Strategy | bear | bull | sideways | mixed |
-|----------|------|------|----------|-------|
-| momentum | -1.54 | 1.60 | -0.48 | -0.34 |
-| mean_reversion | -1.23 | 0.63 | 0.94 | -0.71 |
-| **multi_asset** | **0.44** | 2.08 | 0.05 | 2.51 |
-| multi_factor | -1.63 | 0.75 | 0.46 | 2.62 |
-| stat_arb | -4.21 | 1.85 | 0.40 | 2.04 |
-| regime | -2.14 | 0.87 | 0.24 | 1.45 |
-| pairs_trading | -3.67 | 2.02 | -0.26 | 0.55 |
-
-### Max Drawdown (%)
-
-| Strategy | bear | bull | sideways | mixed |
-|----------|------|------|----------|-------|
-| momentum | -14.58 | -3.02 | -8.36 | -7.41 |
-| mean_reversion | -6.71 | -1.61 | -2.74 | -4.04 |
-| **multi_asset** | **-0.76** | -1.07 | -1.55 | -0.80 |
-| multi_factor | -13.25 | -3.55 | -4.75 | -2.58 |
-| stat_arb | -33.38 | -4.96 | -7.10 | -3.81 |
-| regime | -13.99 | -3.58 | -2.91 | -2.33 |
-| pairs_trading | -29.73 | -4.28 | -9.64 | -6.03 |
-
-### Key Findings
-
-- **multi_asset**: Only strategy profitable across ALL regimes, max drawdown never exceeds 1.55%
-- **mean_reversion**: Best sideways performer (Sharpe 0.94), validates range-bound design
-- **stat_arb/pairs_trading**: Extreme polarization — large gains in bull, large losses in bear
-- **momentum**: Strong bull (Sharpe 1.60) but negative in all other regimes
-- **multi_factor**: Best mixed regime performer (Sharpe 2.62, return +19.75%)
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit pull requests or open issues.
 
 ## License
 
 MIT License
-
-## Disclaimer
-
-This framework is for educational and research purposes only. Past performance does not guarantee future results. Always conduct thorough testing before deploying any trading strategy with real capital.
