@@ -13,7 +13,7 @@ from config import (
     MOMENTUM_STRATEGY, MEAN_REVERSION_STRATEGY, MULTI_ASSET_STRATEGY,
     MULTI_FACTOR_ALPHA, STATISTICAL_ARBITRAGE, MARKET_REGIME_STRATEGY,
     PORTFOLIO_OPTIMIZATION, EXECUTION_CONFIG, PAIRS_TRADING_STRATEGY,
-    WALK_FORWARD_CONFIG, SHORT_CONFIG
+    WALK_FORWARD_CONFIG, SHORT_CONFIG, FEE_CONFIG
 )
 
 
@@ -59,7 +59,8 @@ def run_backtest(strategy_name: str, symbols: list, start_date: str, end_date: s
         stop_loss_method=RISK_CONFIG.get('stop_loss_method', 'pct'),
         atr_period=RISK_CONFIG.get('atr_period', 14),
         atr_mult=RISK_CONFIG.get('atr_mult', 2.5),
-        max_gross=RISK_CONFIG.get('max_gross', 1.0)
+        max_gross=RISK_CONFIG.get('max_gross', 1.0),
+        fee_config=FEE_CONFIG
     )
 
     if strategy_name.lower() == 'momentum':

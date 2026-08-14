@@ -36,7 +36,8 @@ class BacktestEngine:
                  stop_loss_method: str = 'pct',
                  atr_period: int = 14,
                  atr_mult: float = 2.5,
-                 max_gross: float = 1.0):
+                 max_gross: float = 1.0,
+                 fee_config: dict = None):
         self.initial_capital = initial_capital
         self.commission = commission
         self.slippage = slippage
@@ -53,6 +54,12 @@ class BacktestEngine:
         self.max_gross = max_gross
         self.shrinkage_alpha = shrinkage_alpha
         self.max_weight = max_weight
+        fc = fee_config or {}
+        self.stamp_tax = fc.get('stamp_tax', 0.0)
+        self.transfer_fee = fc.get('transfer_fee', 0.0)
+        self.limit_pct_default = fc.get('limit_pct_default', 0.10)
+        self.limit_pct_wide = fc.get('limit_pct_wide', 0.20)
+        self.t_plus_1 = fc.get('t_plus_1', False)
 
         self.portfolio = PortfolioManager(
             initial_capital, max_position_size,
@@ -99,13 +106,39 @@ class BacktestEngine:
         self.results = self._calculate_results()
         return self.results
 
+    def _new_engine(self, initial_capital: float) -> "BacktestEngine":
+        """构造与本引擎同配置的独立引擎(全风险参数透传),用于 walk-forward 避免状态污染。"""
+        e = BacktestEngine(
+            initial_capital=initial_capital, commission=self.commission, slippage=self.slippage,
+            enable_delta_hedging=self.enable_delta_hedging,
+            use_sample_data=getattr(self.data_fetcher, 'use_sample_data', False),
+            market_regime=getattr(self.data_fetcher, 'market_regime', 'bear'),
+            max_position_size=self.risk_manager.max_position_size,
+            stop_loss_pct=self.risk_manager.stop_loss_pct,
+            target_portfolio_vol=self.risk_manager.target_portfolio_vol,
+            position_method=self.position_method, max_weight=self.max_weight,
+            rebalance_threshold=self.rebalance_threshold, shrinkage_alpha=self.shrinkage_alpha,
+            max_single_trade_pct=self.max_single_trade_pct, max_splits=self.max_splits,
+            rebalance_freq=self.rebalance_freq,
+            margin_ratio=self.portfolio.margin_ratio,
+            borrowing_cost_annual=self.portfolio.borrowing_cost_annual,
+            stop_loss_method=self.stop_loss_method, atr_period=self.atr_period,
+            atr_mult=self.atr_mult, max_gross=self.max_gross,
+        )
+        for s in self.strategies:
+            e.add_strategy(s)
+        e.market_data = self.market_data
+        return e
+
     def run_walk_forward(self, train_months: int = 6, test_months: int = 1,
                          start_date: Optional[str] = None,
                          end_date: Optional[str] = None) -> List[Dict]:
-        """Walk-forward segmented backtest for stability verification"""
+        """Walk-forward 分段回测: 每段 train/test 各用独立引擎, 全参数透传, 无跨段状态污染。
+
+        train 段只跑出指标(确认策略在样本内表现), test 段从 initial_capital 重新起算上报 OOS 指标。
+        """
         all_dates = self._get_trading_dates(start_date, end_date)
         results = []
-
         train_days = train_months * 22
         test_days = test_months * 22
         pos = 0
@@ -114,32 +147,24 @@ class BacktestEngine:
             train_slice = all_dates[pos:pos + train_days]
             test_slice = all_dates[pos + train_days:pos + train_days + test_days]
 
+            # train: 独立引擎, 跑完即弃
+            train_engine = self._new_engine(self.initial_capital)
             for current_date in train_slice:
-                self._process_date(current_date)
+                train_engine._process_date(current_date)
+            train_metrics = train_engine._calculate_results()
 
-            test_engine = BacktestEngine(
-                initial_capital=self.portfolio.get_total_value(),
-                commission=self.commission,
-                slippage=self.slippage,
-                enable_delta_hedging=self.enable_delta_hedging,
-                position_method=self.position_method,
-                max_single_trade_pct=self.max_single_trade_pct,
-                max_splits=self.max_splits
-            )
-            for strategy in self.strategies:
-                test_engine.add_strategy(strategy)
-            test_engine.market_data = self.market_data
-
+            # test: 独立引擎, OOS 从 initial_capital 起算
+            test_engine = self._new_engine(self.initial_capital)
             for current_date in test_slice:
                 test_engine._process_date(current_date)
-
             test_metrics = test_engine._calculate_results()
+
             results.append({
                 'train_period': (str(train_slice[0]), str(train_slice[-1])),
                 'test_period': (str(test_slice[0]), str(test_slice[-1])),
-                'metrics': test_metrics
+                'train_metrics': train_metrics,
+                'metrics': test_metrics,
             })
-
             pos += train_days + test_days
 
         return results
@@ -197,7 +222,12 @@ class BacktestEngine:
                 remaining.append(order)
                 continue
 
-            price = self._apply_costs(current_prices[symbol], order['signal_type'])
+            # 涨跌停: 当日无法成交则顺延到下一交易日
+            if self._is_limit_blocked(symbol, current_date, current_prices[symbol], order['signal_type']):
+                remaining.append(order)
+                continue
+
+            price = self._apply_costs(current_prices[symbol], order['signal_type'], symbol)
             size = order['size_per_batch']
 
             if order['signal_type'] in [SignalType.BUY, SignalType.BUY_CALL, SignalType.BUY_PUT]:
@@ -260,6 +290,13 @@ class BacktestEngine:
         for pos_key, position in list(self.portfolio.positions.items()):
             if position.symbol not in current_prices:
                 continue
+            # T+1: 当日新建仓不可当日平(止损顺延到次日)
+            if self.t_plus_1:
+                try:
+                    if pd.Timestamp(position.entry_time).normalize() == pd.Timestamp(current_date).normalize():
+                        continue
+                except Exception:
+                    pass
             cur_price = current_prices[position.symbol]
 
             if position.position_type == 'long':
@@ -338,7 +375,11 @@ class BacktestEngine:
         if current_price is None or current_price <= 0:
             return
 
-        execution_price = self._apply_costs(current_price, signal.signal_type)
+        # 涨跌停拦截: 涨停禁买, 跌停禁卖
+        if self._is_limit_blocked(signal.symbol, signal.timestamp, current_price, signal.signal_type):
+            return
+
+        execution_price = self._apply_costs(current_price, signal.signal_type, signal.symbol)
         portfolio_value = self.portfolio.get_total_value()
 
         if signal.signal_type in [SignalType.BUY, SignalType.BUY_CALL, SignalType.BUY_PUT]:
@@ -422,12 +463,60 @@ class BacktestEngine:
                     **signal.metadata if signal.metadata else {}
                 )
 
-    def _apply_costs(self, price: float, signal_type: SignalType) -> float:
-        """Apply commission and slippage to price"""
-        if signal_type in [SignalType.BUY, SignalType.BUY_CALL, SignalType.BUY_PUT, SignalType.OPEN_SHORT]:
-            return price * (1 + self.commission + self.slippage)
-        else:
-            return price * (1 - self.commission - self.slippage)
+    # 买入类(你付钱, 价格上抬): BUY/BUY_CALL/BUY_PUT/CLOSE_SHORT(买券还券)
+    _BUY_ACTIONS = {SignalType.BUY, SignalType.BUY_CALL, SignalType.BUY_PUT, SignalType.CLOSE_SHORT}
+    # 卖出类(你收钱, 价格下压): SELL/CLOSE_LONG/OPEN_SHORT/SELL_CALL/SELL_PUT
+    _SELL_ACTIONS = {SignalType.SELL, SignalType.CLOSE_LONG, SignalType.OPEN_SHORT,
+                     SignalType.SELL_CALL, SignalType.SELL_PUT}
+    # 缴印花税的卖出动作(融券卖出 OPEN_SHORT 法定免印花税, 不在内)
+    _STAMP_ACTIONS = {SignalType.SELL, SignalType.CLOSE_LONG, SignalType.SELL_CALL, SignalType.SELL_PUT}
+
+    def _exchange(self, symbol: str) -> str:
+        """沪市收过户费: 6/9 开头(沪)→'SH'; 其余→'SZ'。简化,北交所近似归 SZ。"""
+        return 'SH' if symbol[:1] in ('6', '9') else 'SZ'
+
+    def _limit_pct(self, symbol: str) -> float:
+        """涨跌停幅度: 创业板(300/301)/科创板(688)/北交所(8/4) 20%, 主板 10%。"""
+        if symbol[:3] in ('300', '301') or symbol[:3] == '688' or symbol[:1] in ('8', '4'):
+            return self.limit_pct_wide
+        return self.limit_pct_default
+
+    def _prev_close(self, symbol: str, current_date: pd.Timestamp) -> Optional[float]:
+        """symbol 在 current_date 前一交易日的收盘价(用于涨跌停判定)。"""
+        if symbol not in self.market_data:
+            return None
+        df = self.market_data[symbol]
+        hist = df[df.index < current_date]
+        if hist.empty:
+            return None
+        return float(hist['close'].iloc[-1])
+
+    def _is_limit_blocked(self, symbol: str, current_date: pd.Timestamp,
+                          price: float, signal_type: SignalType) -> bool:
+        """涨跌停限制: 涨停禁买, 跌停禁卖。"""
+        prev = self._prev_close(symbol, current_date)
+        if prev is None or prev <= 0:
+            return False
+        pct = self._limit_pct(symbol)
+        limit_up = prev * (1 + pct)
+        limit_down = prev * (1 - pct)
+        if signal_type in self._BUY_ACTIONS and price >= limit_up - 1e-9:
+            return True
+        if signal_type in self._SELL_ACTIONS and price <= limit_down + 1e-9:
+            return True
+        return False
+
+    def _apply_costs(self, price: float, signal_type: SignalType, symbol: str = '') -> float:
+        """Apply commission + slippage + 印花税(卖出) + 过户费(沪市双向) to price。
+
+        买入类: price*(1 + 佣金 + 滑点 + 过户费_SH)
+        卖出类: price*(1 - 佣金 - 滑点 - 过户费_SH - 印花税(if 缴税动作))
+        """
+        sh_fee = self.transfer_fee if (symbol and self._exchange(symbol) == 'SH') else 0.0
+        if signal_type in self._BUY_ACTIONS:
+            return price * (1 + self.commission + self.slippage + sh_fee)
+        stamp = self.stamp_tax if signal_type in self._STAMP_ACTIONS else 0.0
+        return price * (1 - self.commission - self.slippage - sh_fee - stamp)
 
     def _check_portfolio_risk(self, current_date: pd.Timestamp,
                               current_prices: Dict[str, float]):
@@ -449,25 +538,38 @@ class BacktestEngine:
 
     def _reduce_positions(self, current_date: pd.Timestamp,
                           current_prices: Dict[str, float]):
-        """Reduce largest positions until portfolio risk is within limits"""
+        """按市值降序, 比例缩减多个最大持仓(非仅一只一半), 跌停/当日新仓跳过。"""
         sorted_positions = sorted(
             self.portfolio.positions.items(),
-            key=lambda x: x[1].market_value,
+            key=lambda x: abs(x[1].market_value),
             reverse=True
         )
-
+        reduced = 0
         for pos_key, position in sorted_positions:
+            if reduced >= 5:
+                break
             if position.symbol not in current_prices:
                 continue
-            reduce_qty = int(position.quantity * 0.5)
+            # T+1: 当日新仓不平
+            if self.t_plus_1:
+                try:
+                    if pd.Timestamp(position.entry_time).normalize() == pd.Timestamp(current_date).normalize():
+                        continue
+                except Exception:
+                    pass
+            # 涨跌停: 多头跌停禁卖, 空头涨停禁买(平)
+            sell_action = SignalType.CLOSE_LONG if position.position_type == 'long' else SignalType.CLOSE_SHORT
+            if self._is_limit_blocked(position.symbol, current_date, current_prices[position.symbol], sell_action):
+                continue
+            reduce_qty = int(position.quantity * 0.3)
             if reduce_qty > 0:
                 self.portfolio.close_position(
                     position.symbol, reduce_qty,
-                    current_prices[position.symbol], current_date,
-                    position_type=position.position_type,
+                    self._apply_costs(current_prices[position.symbol], sell_action, position.symbol),
+                    current_date, position_type=position.position_type,
                     asset_type=position.asset_type
                 )
-            break
+                reduced += 1
 
     def _market_trend(self, current_date: pd.Timestamp) -> float:
         """组合级市场趋势: 各股 60 日收益均值(>0 牛, <0 熊)。"""
@@ -488,10 +590,18 @@ class BacktestEngine:
         equity_df = self.portfolio.get_equity_curve_df()
         if len(equity_df) < 30:
             return self.max_gross
-        returns = equity_df['total_value'].pct_change().dropna()
-        if len(returns) < 20:
+        # 用"敞口收益"算 realized vol(每日盈亏 / 当日总敞口), 而非净值收益。
+        # 净值收益会被现金压平(低仓位→净值波动小→gross 虚高→vol-target 形同虚设);
+        # 敞口收益反映"满仓时的篮子波动", 不受仓位高低影响。
+        pnl = equity_df['total_value'].diff()
+        gross_series = equity_df.get('positions_value', equity_df['total_value'])
+        mask = gross_series > 0
+        if mask.sum() < 20:
             return self.max_gross
-        realized_vol = returns.tail(60).std() * np.sqrt(252) if len(returns) >= 60 else returns.std() * np.sqrt(252)
+        ret = (pnl[mask] / gross_series[mask]).dropna()
+        if len(ret) < 20:
+            return self.max_gross
+        realized_vol = ret.tail(60).std() * np.sqrt(252) if len(ret) >= 60 else ret.std() * np.sqrt(252)
         if realized_vol <= 0:
             return self.max_gross
         target = self.risk_manager.target_portfolio_vol
@@ -546,11 +656,12 @@ class BacktestEngine:
 
         current_weights = {}
         for symbol in symbols:
-            pos = self.portfolio.get_position(symbol, position_type='long')
-            if pos:
-                current_weights[symbol] = pos.market_value / portfolio_value
-            else:
-                current_weights[symbol] = 0.0
+            # 净敞口 = 多头市值 - 空头绝对市值(再平衡纳入空头)
+            long_pos = self.portfolio.get_position(symbol, position_type='long')
+            short_pos = self.portfolio.get_position(symbol, position_type='short')
+            long_mv = long_pos.market_value if long_pos else 0.0
+            short_mv = short_pos.short_market_value_abs if short_pos else 0.0
+            current_weights[symbol] = (long_mv - short_mv) / portfolio_value
 
         for symbol in symbols:
             if symbol not in current_prices or symbol not in target_weights:
@@ -560,16 +671,30 @@ class BacktestEngine:
             deviation = abs(target - current)
 
             if deviation > self.rebalance_threshold and current_prices[symbol] > 0:
+                # 涨跌停跳过当日再平衡该标的
+                if self._is_limit_blocked(symbol, current_date, current_prices[symbol], SignalType.BUY):
+                    continue
+                price = current_prices[symbol]
                 target_value = target * portfolio_value
                 current_value = current * portfolio_value
                 diff_value = target_value - current_value
 
                 if diff_value > 0:
-                    add_qty = int(diff_value / current_prices[symbol])
+                    # 净敞口低于目标: 先平空头把净敞口往多头推, 剩余再开多
+                    short_pos = self.portfolio.get_position(symbol, position_type='short')
+                    if short_pos:
+                        close_qty = min(int(diff_value / price), int(short_pos.quantity))
+                        if close_qty > 0:
+                            self.portfolio.close_position(
+                                symbol, close_qty,
+                                self._apply_costs(price, SignalType.CLOSE_SHORT, symbol),
+                                current_date, position_type='short', asset_type='stock')
+                            diff_value -= close_qty * price
+                    add_qty = int(diff_value / price)
                     if add_qty > 0:
                         self.portfolio.open_position(
                             symbol, add_qty,
-                            current_prices[symbol] * (1 + self.commission + self.slippage),
+                            self._apply_costs(price, SignalType.BUY, symbol),
                             current_date, position_type='long', asset_type='stock'
                         )
                 elif diff_value < 0:
@@ -580,7 +705,7 @@ class BacktestEngine:
                         if reduce_qty > 0:
                             self.portfolio.close_position(
                                 symbol, reduce_qty,
-                                current_prices[symbol] * (1 - self.commission - self.slippage),
+                                self._apply_costs(current_prices[symbol], SignalType.CLOSE_LONG, symbol),
                                 current_date, position_type='long', asset_type='stock'
                             )
 
@@ -774,4 +899,40 @@ class BacktestEngine:
         print(f"Closed Positions:       {self.results['num_closed_positions']}")
         print(f"\nCash:                   ¥{self.results['cash']:,.2f}")
         print(f"Positions Value:        ¥{self.results['positions_value']:,.2f}")
+        self.report_vs_benchmark()
         print("="*60 + "\n")
+
+    def _buy_hold_return(self) -> Optional[float]:
+        """等权买入持有(满仓, 不再平衡)在回测区间的总收益 %。"""
+        if not self.market_data:
+            return None
+        try:
+            all_dates = self._get_trading_dates(None, None)
+            if not all_dates:
+                return None
+            start, end = all_dates[0], all_dates[-1]
+            rets = []
+            for symbol, df in self.market_data.items():
+                seg = df[(df.index >= start) & (df.index <= end)]['close']
+                if len(seg) >= 2:
+                    rets.append(seg.iloc[-1] / seg.iloc[0] - 1)
+            if not rets:
+                return None
+            return float(np.mean(rets) * 100)
+        except Exception:
+            return None
+
+    def report_vs_benchmark(self):
+        """打印策略 vs 等权买入持有 + 60/40 基准对照。"""
+        bh = self._buy_hold_return()
+        if bh is None:
+            return
+        strat = self.results.get('total_return_pct', 0) if self.results else 0
+        days = self.results.get('total_days', 0) if self.results else 0
+        rf = self.risk_manager.risk_free_rate * (days / 365) if days else 0  # 区间无风险收益(近似)
+        bench_6040 = 0.6 * bh + 0.4 * (rf * 100)
+        print(f"\n--- vs 基准 ---")
+        print(f"等权买入持有:          {bh:+.2f}%")
+        print(f"60/40(股/债):          {bench_6040:+.2f}%")
+        print(f"策略超额 vs 持有:      {strat - bh:+.2f}pp")
+        print(f"策略超额 vs 60/40:     {strat - bench_6040:+.2f}pp")

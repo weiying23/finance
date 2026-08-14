@@ -179,3 +179,22 @@ class BaseStrategy(ABC):
         true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         atr = true_range.rolling(window=window).mean()             # 真实波幅的移动平均
         return atr
+
+    @staticmethod
+    def calculate_adx(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 14) -> pd.Series:
+        """
+        计算平均定向指数 (Average Directional Index) — 趋势强度(非方向)。
+        ADX>25 视为强趋势, 可用作趋势/震荡滤子。简化实现(rolling mean 近似 Wilder EMA)。
+        """
+        up_move = high.diff()
+        down_move = -low.diff()
+        plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+        minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+        atr = BaseStrategy.calculate_atr(high, low, close, window)
+        atr = atr.replace(0, np.nan)
+        plus_di = 100 * (plus_dm.rolling(window=window).mean() / atr)
+        minus_di = 100 * (minus_dm.rolling(window=window).mean() / atr)
+        di_sum = (plus_di + minus_di).replace(0, np.nan)
+        dx = 100 * (plus_di - minus_di).abs() / di_sum
+        adx = dx.rolling(window=window).mean()
+        return adx

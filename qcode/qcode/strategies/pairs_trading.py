@@ -114,23 +114,20 @@ class PairsTradingStrategy(BaseStrategy):
                 ))
 
             elif abs(current_z) < exit and abs(previous_z) >= exit:
-                signals.append(Signal(
-                    timestamp=current_date,
-                    symbol=sym1,
-                    signal_type=SignalType.CLOSE_LONG,
-                    quantity=0,
-                    price=current_price1,
-                    confidence=0.5,
-                    metadata={'z_score': current_z, 'pair': (sym1, sym2)}
-                ))
-                signals.append(Signal(
-                    timestamp=current_date,
-                    symbol=sym2,
-                    signal_type=SignalType.CLOSE_SHORT,
-                    quantity=0,
-                    price=current_price2,
-                    confidence=0.5,
-                    metadata={'z_score': current_z, 'pair': (sym1, sym2)}
-                ))
+                # 退出: 不写死方向, 对两条腿各发 CLOSE_LONG+CLOSE_SHORT,
+                # 关掉任意方向开着的腿(engine 对无持仓的 close 静默 no-op)。
+                # 修复原 bug: 原 exit 恒发 CLOSE_LONG(sym1)+CLOSE_SHORT(sym2),
+                # 对 z>+2 入场(空 sym1/多 sym2)的对永远关不掉。
+                for sym, px in [(sym1, current_price1), (sym2, current_price2)]:
+                    signals.append(Signal(
+                        timestamp=current_date, symbol=sym,
+                        signal_type=SignalType.CLOSE_LONG, quantity=0, price=px,
+                        confidence=0.5, metadata={'z_score': current_z, 'pair': (sym1, sym2)}
+                    ))
+                    signals.append(Signal(
+                        timestamp=current_date, symbol=sym,
+                        signal_type=SignalType.CLOSE_SHORT, quantity=0, price=px,
+                        confidence=0.5, metadata={'z_score': current_z, 'pair': (sym1, sym2)}
+                    ))
 
         return signals

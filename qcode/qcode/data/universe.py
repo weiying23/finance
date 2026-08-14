@@ -4,6 +4,11 @@ Selects the top-N most liquid A-shares as of a given date, using only data
 in the lookback window IMMEDIATELY BEFORE that date. This avoids the
 survivorship/look-ahead bias of selecting the universe by end-of-sample
 liquidity and then backtesting earlier periods.
+
+**已知偏差(无法用 baostock 根除)**:候选池来自 `baostock.query_hs300_stocks()`,
+返回的是**当前**沪深 300 成分股名单,退市/被剔除的股票不在池中 → 仍有**幸存者偏差**。
+本模块只解决了"流动性时点"前视,成分名单的幸存者偏差需历史成分数据(tushare 可查)
+才能完全消除。结论应定性不定量。
 """
 import os
 from datetime import timedelta
@@ -49,7 +54,8 @@ def select_liquidity_universe(as_of: str, top_n: int = 50, lookback_days: int = 
     cache_key = f"universe_{source}_{top_n}_{lookback_days}_{as_of_ts.strftime('%Y%m%d')}"
     cache_path = os.path.join(cache_dir, f"{cache_key}.csv")
     if os.path.exists(cache_path):
-        return pd.read_csv(cache_path)['code'].tolist()
+        # dtype=str 保留前导零(000063 否则会被读成 int 63)
+        return pd.read_csv(cache_path, dtype={'code': str})['code'].tolist()
 
     cand = _hs300_candidates()  # code like 'sh.600000'
     from qcode.data.factory import create_data_source

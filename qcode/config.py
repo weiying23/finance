@@ -10,7 +10,7 @@ BACKTEST_CONFIG = {
 
 # Risk Management Configuration
 RISK_CONFIG = {
-    'max_position_size': 0.1,           # 单标的市值上限(已被波动率目标仓位弱化,仅作硬上限兜底)
+    'max_position_size': 0.15,          # 单标的硬上限(与 max_weight 对齐, 避免再平衡目标被截断打架)
     'max_portfolio_var': 0.02,
     'risk_free_rate': 0.03,
     'stop_loss_method': 'atr',          # 'atr'(ATR标定) | 'pct'(固定百分比)
@@ -34,6 +34,16 @@ PORTFOLIO_OPTIMIZATION = {
 EXECUTION_CONFIG = {
     'max_single_trade_pct': 0.03,
     'max_splits': 5
+}
+
+# Fee & A-share Realism Configuration
+# 印花税(卖出单边 0.05%) + 过户费(沪市双向 0.001%) + 涨跌停
+FEE_CONFIG = {
+    'stamp_tax': 0.0005,          # 印花税,卖出单边
+    'transfer_fee': 0.00001,      # 过户费,沪市双向(深市为 0)
+    'limit_pct_default': 0.10,    # 主板涨跌停
+    'limit_pct_wide': 0.20,       # 创业板(300/301)/科创板(688)/北交所(8/4)
+    't_plus_1': True,             # T+1: 当日买入次日才可卖
 }
 
 # Short Position Configuration

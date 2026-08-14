@@ -1,16 +1,15 @@
 """
-多资产交易策略，结合股票与衍生品（期权、期货）
+多资产交易策略：趋势 + MACD 生成股票多空信号（纯股票多空，已移除失效的期权死代码分支）
 """
 from typing import Dict, List
 import pandas as pd
 import numpy as np
-from datetime import timedelta
 
 from qcode.strategies.base import BaseStrategy, Signal, SignalType
 
 
 class MultiAssetStrategy(BaseStrategy):
-    """多资产策略：利用趋势和波动率指标生成股票多空信号，并在高波动时附加期权信号"""
+    """多资产策略：趋势强度 + MACD 柱生成股票多空信号。高波动通过 vol-target/regime overlay 在引擎层降仓处理。"""
 
     def __init__(self, name: str = "MultiAsset",
                  trend_period: int = 20,
@@ -42,13 +41,10 @@ class MultiAssetStrategy(BaseStrategy):
         df.loc[(df['trend_strength'] > 0.02) & (df['macd_hist'] > 0), 'position_signal'] = 1
         df.loc[(df['trend_strength'] < -0.02) & (df['macd_hist'] < 0), 'position_signal'] = -1
 
-        df['hedge_signal'] = 0
-        df.loc[df['volatility'] > self.params['hedge_threshold'], 'hedge_signal'] = 1
-
         return df
 
     def generate_signals(self, data: Dict[str, pd.DataFrame]) -> List[Signal]:
-        """根据指标生成多资产交易信号，所有信号带confidence"""
+        """根据指标生成股票多空信号，所有信号带confidence"""
         signals = []
 
         for symbol, df in data.items():
@@ -74,23 +70,6 @@ class MultiAssetStrategy(BaseStrategy):
                     metadata={'volatility': current['volatility']}
                 ))
 
-                if current['hedge_signal'] == 1:
-                    strike_price = current['close'] * 0.95
-                    signals.append(Signal(
-                        timestamp=current.name,
-                        symbol=symbol,
-                        signal_type=SignalType.BUY_PUT,
-                        quantity=0,
-                        price=current['close'] * 0.03,
-                        confidence=min(abs(current['trend_strength']), 1.0),
-                        metadata={
-                            'strike': strike_price,
-                            'expiry': current.name + timedelta(days=30),
-                            'option_type': 'put',
-                            'volatility': current['volatility']
-                        }
-                    ))
-
             elif current['position_signal'] == -1 and previous['position_signal'] != -1:
                 signals.append(Signal(
                     timestamp=current.name,
@@ -107,23 +86,6 @@ class MultiAssetStrategy(BaseStrategy):
                     quantity=0,
                     price=current['close'],
                     confidence=min(abs(current['trend_strength']), 1.0)
-                ))
-
-            if current['volatility'] > self.params['hedge_threshold'] * 1.5:
-                strike_price = current['close'] * 1.05
-                signals.append(Signal(
-                    timestamp=current.name,
-                    symbol=symbol,
-                    signal_type=SignalType.SELL_CALL,
-                    quantity=0,
-                    price=current['close'] * 0.02,
-                    confidence=0.5,
-                    metadata={
-                        'strike': strike_price,
-                        'expiry': current.name + timedelta(days=30),
-                        'option_type': 'call',
-                        'volatility': current['volatility']
-                    }
                 ))
 
         return signals

@@ -274,26 +274,40 @@ class MarketRegimeStrategy(BaseStrategy):
         df.loc[(df['trend'] < -self.params['trend_threshold']) &
                (df['volatility'] >= self.params['volatility_threshold']), 'regime'] = 'downtrend_high_vol'
 
+        # signal 语义统一为"想持有什么方向", 不再有同值双义:
+        #   1 = 想多头(BUY+CLOSE_SHORT)  -1 = 想空头(CLOSE_LONG+OPEN_SHORT)
+        #   2 = 平多(止盈/退出)          3 = 平空
+        #   0 = 观望
         df['signal'] = 0
 
-        mask = (df['regime'] == 'uptrend_low_vol') & (df['close'] > df['sma_20'])
-        df.loc[mask & (df['close'].shift(1) <= df['sma_20'].shift(1)), 'signal'] = 1
-        df.loc[mask & (df['close'] < df['sma_20']), 'signal'] = -1
+        # 上升趋势低波: 突破买入, 跌破均线仅平多(不在上升趋势里做空)
+        mask = (df['regime'] == 'uptrend_low_vol')
+        df.loc[mask & (df['close'] > df['sma_20']) & (df['close'].shift(1) <= df['sma_20'].shift(1)), 'signal'] = 1
+        df.loc[mask & (df['close'] < df['sma_20']), 'signal'] = 2
 
-        mask = (df['regime'] == 'uptrend_high_vol') & (df['close'] > df['sma_50'])
-        df.loc[mask & (df['close'].shift(1) <= df['sma_50'].shift(1)), 'signal'] = 1
+        # 上升趋势高波: 站上 SMA50 才持多
+        mask = (df['regime'] == 'uptrend_high_vol')
+        df.loc[mask & (df['close'] > df['sma_50']), 'signal'] = 1
+        df.loc[mask & (df['close'] < df['sma_50']), 'signal'] = 2
 
-        mask = df['regime'].isin(['downtrend_low_vol', 'sideways'])
+        # 震荡: 下轨买入、上轨做空(典型均值回归)
+        mask = (df['regime'] == 'sideways')
         df.loc[mask & (df['close'] < df['sma_20'] * 0.98), 'signal'] = 1
         df.loc[mask & (df['close'] > df['sma_20'] * 1.02), 'signal'] = -1
 
-        mask = df['regime'] == 'downtrend_high_vol'
-        df.loc[mask, 'signal'] = 0
+        # 下跌趋势低波: 弱势做空(破位), 反弹仅平空
+        mask = (df['regime'] == 'downtrend_low_vol')
+        df.loc[mask & (df['close'] < df['sma_20'] * 0.98), 'signal'] = -1
+        df.loc[mask & (df['close'] > df['sma_20'] * 1.02), 'signal'] = 3
+
+        # 下跌趋势高波: 反手做空(原逻辑只平仓不反手, 不闭环; 现在做空吃跌)
+        mask = (df['regime'] == 'downtrend_high_vol')
+        df.loc[mask, 'signal'] = -1
 
         return df
 
     def generate_signals(self, data: Dict[str, pd.DataFrame]) -> List[Signal]:
-        """Generate regime-adaptive signals with clear BUY/OPEN_SHORT/CLOSE distinction"""
+        """按 signal 值路由动作: 1=多头, -1=空头, 2=平多, 3=平空, 0=观望。"""
         signals = []
 
         for symbol, df in data.items():
@@ -307,67 +321,29 @@ class MarketRegimeStrategy(BaseStrategy):
 
             current = df.iloc[-1]
             previous = df.iloc[-2]
+            conf = min(abs(current['trend']) / 0.05, 1.0)
+            meta = {'regime': current['regime']}
 
-            if current['signal'] == 1 and previous['signal'] != 1:
-                signals.append(Signal(
-                    timestamp=current.name,
-                    symbol=symbol,
-                    signal_type=SignalType.BUY,
-                    quantity=0,
-                    price=current['close'],
-                    confidence=min(abs(current['trend']) / 0.05, 1.0),
-                    metadata={'regime': current['regime']}
-                ))
-                signals.append(Signal(
-                    timestamp=current.name,
-                    symbol=symbol,
-                    signal_type=SignalType.CLOSE_SHORT,
-                    quantity=0,
-                    price=current['close'],
-                    confidence=min(abs(current['trend']) / 0.05, 1.0),
-                    metadata={'regime': current['regime']}
-                ))
+            def sig(stype):
+                return Signal(timestamp=current.name, symbol=symbol, signal_type=stype,
+                              quantity=0, price=current['close'], confidence=conf, metadata=meta)
 
-            elif current['signal'] == -1 and previous['signal'] != -1:
-                signals.append(Signal(
-                    timestamp=current.name,
-                    symbol=symbol,
-                    signal_type=SignalType.CLOSE_LONG,
-                    quantity=0,
-                    price=current['close'],
-                    confidence=min(abs(current['trend']) / 0.05, 1.0),
-                    metadata={'regime': current['regime']}
-                ))
-                signals.append(Signal(
-                    timestamp=current.name,
-                    symbol=symbol,
-                    signal_type=SignalType.OPEN_SHORT,
-                    quantity=0,
-                    price=current['close'],
-                    confidence=min(abs(current['trend']) / 0.05, 1.0),
-                    metadata={'regime': current['regime']}
-                ))
+            cur, prev = current['signal'], previous['signal']
 
-            elif current['signal'] == 0 and previous['signal'] != 0:
-                if previous['signal'] == 1:
-                    signals.append(Signal(
-                        timestamp=current.name,
-                        symbol=symbol,
-                        signal_type=SignalType.CLOSE_LONG,
-                        quantity=0,
-                        price=current['close'],
-                        confidence=min(abs(current['trend']) / 0.05, 1.0),
-                        metadata={'regime': current['regime']}
-                    ))
-                elif previous['signal'] == -1:
-                    signals.append(Signal(
-                        timestamp=current.name,
-                        symbol=symbol,
-                        signal_type=SignalType.CLOSE_SHORT,
-                        quantity=0,
-                        price=current['close'],
-                        confidence=min(abs(current['trend']) / 0.05, 1.0),
-                        metadata={'regime': current['regime']}
-                    ))
+            if cur == 1 and prev != 1:
+                signals.append(sig(SignalType.BUY))
+                signals.append(sig(SignalType.CLOSE_SHORT))
+            elif cur == -1 and prev != -1:
+                signals.append(sig(SignalType.CLOSE_LONG))
+                signals.append(sig(SignalType.OPEN_SHORT))
+            elif cur == 2 and prev != 2:
+                signals.append(sig(SignalType.CLOSE_LONG))
+            elif cur == 3 and prev != 3:
+                signals.append(sig(SignalType.CLOSE_SHORT))
+            elif cur == 0 and prev != 0:
+                if prev == 1:
+                    signals.append(sig(SignalType.CLOSE_LONG))
+                elif prev == -1:
+                    signals.append(sig(SignalType.CLOSE_SHORT))
 
         return signals
