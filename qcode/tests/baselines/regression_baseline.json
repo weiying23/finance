@@ -1,7 +1,7 @@
 {
   "meta": {
-    "git_hash": "b7fb70b2c82e8e73586b72586918930795ed764c",
-    "generated_at": "2026-08-14T22:50:20",
+    "git_hash": "6a4637f63d55a14950e698afb341d7fc52e98c2a",
+    "generated_at": "2026-08-14T23:44:20",
     "market_regime": "mixed",
     "universe": [
       "600519",
@@ -37,9 +37,9 @@
       "num_trades": 849
     },
     "multi_factor": {
-      "final_value": 1138130.08,
-      "max_drawdown_pct": -2.9519,
-      "num_trades": 1590
+      "final_value": 1207929.52,
+      "max_drawdown_pct": -3.5685,
+      "num_trades": 1311
     },
     "stat_arb": {
       "final_value": 1157209.46,

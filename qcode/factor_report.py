@@ -18,7 +18,7 @@ import pandas as pd
 
 sys.path.insert(0, '.')
 
-from config import STOCK_UNIVERSE
+from config import STOCK_UNIVERSE, MULTI_FACTOR_ALPHA
 from qcode.data.sample_source import SampleDataSource
 from qcode.strategies.alpha_mining import MultiFactorAlpha
 from qcode.utils.significance import factor_ic_report, suggest_weights
@@ -32,8 +32,12 @@ def load_data(sample: bool, regime: str, symbols, start: str, end: str):
     if sample:
         ds = SampleDataSource(market_regime=regime)
         return ds.get_multiple_stocks(symbols, start, end)
+    # 真实数据: 与主引擎一致, 读 config.DATA_CONFIG['data_source'](默认 baostock)
+    from config import DATA_CONFIG
     from qcode.data.factory import create_data_source
-    ds = create_data_source(cache_data=True)
+    ds = create_data_source(source=DATA_CONFIG.get('data_source', 'baostock'),
+                            tushare_token=DATA_CONFIG.get('tushare_token', ''),
+                            cache_data=True)
     return ds.get_multiple_stocks(symbols, start, end)
 
 
@@ -61,7 +65,8 @@ def main():
           f"{len(symbols)} 只 | {args.start} ~ {args.end}\n")
 
     data = load_data(not args.real, args.regime, symbols, args.start, args.end)
-    strat = MultiFactorAlpha()
+    # 用 config 里的权重(真实数据 IC 检验重配后的), 而非策略构造函数默认值
+    strat = MultiFactorAlpha(**MULTI_FACTOR_ALPHA)
     indicated = {s: strat.calculate_indicators(df) for s, df in data.items()}
 
     report = factor_ic_report(indicated, FACTORS, forward_periods=FORWARD_PERIODS)

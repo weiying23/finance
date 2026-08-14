@@ -101,11 +101,16 @@ MULTI_ASSET_STRATEGY = {
 }
 
 # Alpha Mining Strategies
+# 权重按真实数据 IC 检验(2022-2023, baostock 6只)重配:
+#   value_score       IC@20=+0.162, ICIR=+1.02  ← 唯一强正效因子, 高权重
+#   volatility_score  IC@20=-0.294, ICIR=-1.36  ← 强反向, 权重取负 = 反转使用(高波股票未来跑赢)
+#   momentum_score    IC≈0, volume_score IC≈0   ← 无效, 权重 0
+# 依据: python factor_report.py --real
 MULTI_FACTOR_ALPHA = {
-    'momentum_weight': 0.4,
-    'value_weight': 0.3,
-    'volatility_weight': 0.2,
-    'volume_weight': 0.1
+    'momentum_weight': 0.0,
+    'value_weight': 0.6,
+    'volatility_weight': -0.4,
+    'volume_weight': 0.0
 }
 
 STATISTICAL_ARBITRAGE = {
