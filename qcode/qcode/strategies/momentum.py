@@ -96,11 +96,18 @@ class MomentumStrategy(BaseStrategy):
                 ))
 
             elif current['signal'] == 2 and previous['signal'] != 2:
-                # RSI 超买止盈: 仅平多, 不开空(避免趋势中反复"超买做空"被扫损)
+                # RSI 超买止盈: 平多; 同时平空——下跌途中超买反弹时空仓也在此止盈,
+                # 否则 -1→2→-1 链条里空仓未平又开空, 会与未平空仓合并叠加翻倍。
+                # 引擎对无持仓的 close 信号是 no-op, 上行趋势中无空仓时安全。
                 confidence = min(abs(current['rsi'] - 50) / 50, 1.0)
                 signals.append(Signal(
                     timestamp=current.name, symbol=symbol,
                     signal_type=SignalType.CLOSE_LONG, quantity=0, price=current['close'],
+                    confidence=confidence
+                ))
+                signals.append(Signal(
+                    timestamp=current.name, symbol=symbol,
+                    signal_type=SignalType.CLOSE_SHORT, quantity=0, price=current['close'],
                     confidence=confidence
                 ))
 

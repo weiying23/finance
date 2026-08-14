@@ -71,8 +71,47 @@ def test_t1_same_day_not_closable():
     print("  #3 T+1 当日新仓阻挡: PASS")
 
 
+def test_momentum_no_short_doubling():
+    """#4: signal=2(RSI超买止盈)必须同时平空, 防止 -1→2→-1 链条里短仓叠加翻倍。
+
+    原 bug: signal=2 分支只发 CLOSE_LONG。若空仓未平(下跌途中超买反弹)时进入 2,
+    之后 signal 回到 -1 会再发 OPEN_SHORT 与未平空仓合并 → 短仓翻倍。
+    回归: 2 分支必须同时发 CLOSE_LONG + CLOSE_SHORT。
+    """
+    from qcode.strategies.momentum import MomentumStrategy
+    from qcode.strategies.base import SignalType
+
+    strat = MomentumStrategy(fast_period=1, slow_period=2)
+    fake = pd.DataFrame({
+        'close': [10.0, 11.0, 10.5],
+        'rsi':   [50.0, 80.0, 45.0],   # 仅供 confidence 计算
+        'signal': [-1, 2, -1],          # 死叉开空 → 超买反弹 → 死叉再开空
+    })
+    strat.calculate_indicators = lambda df: fake.iloc[:len(df)]
+
+    long_q = short_q = 0
+
+    def apply(sigs):
+        nonlocal long_q, short_q
+        for s in sigs:
+            if s.signal_type == SignalType.CLOSE_LONG:
+                long_q = max(0, long_q - 1)
+            elif s.signal_type == SignalType.CLOSE_SHORT:
+                short_q = max(0, short_q - 1)
+            elif s.signal_type == SignalType.OPEN_SHORT:
+                short_q += 1
+
+    # day2: signal=2, prev=-1 → 必须平空(修复点)
+    apply(strat.generate_signals({'x': fake.iloc[:2]}))
+    # day3: signal=-1, prev=2 → 干净开新空, 不得叠加
+    apply(strat.generate_signals({'x': fake.iloc[:3]}))
+    assert short_q <= 1, f"短仓叠加: short_q={short_q} (应 ≤1, 2 分支必须平空)"
+    print("  #4 momentum 超买止盈平空(防短仓叠加): PASS")
+
+
 def _run_all():
-    for fn in [test_fee_config_passthrough, test_gross_cap_no_leverage, test_t1_same_day_not_closable]:
+    for fn in [test_fee_config_passthrough, test_gross_cap_no_leverage, test_t1_same_day_not_closable,
+               test_momentum_no_short_doubling]:
         print(f"running {fn.__name__}...")
         fn()
     print("\nALL TESTS PASSED")
