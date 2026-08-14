@@ -3,7 +3,6 @@ import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple
 
-
 def calculate_ic(factor_values: pd.Series, forward_returns: pd.Series) -> float:
     """Information Coefficient: Pearson correlation between factor and forward returns"""
     if len(factor_values) < 5 or len(forward_returns) < 5:
@@ -104,3 +103,48 @@ def calculate_factor_significance(data: Dict[str, pd.DataFrame],
         }
 
     return results
+
+
+def factor_ic_report(data: Dict[str, pd.DataFrame], factor_names: List[str],
+                     forward_periods: Tuple[int, ...] = (5, 10, 20)) -> Dict[str, Dict[int, Dict]]:
+    """多周期因子 IC 报告: 每个因子 × 每个 forward_period 的 mean_IC / ICIR / FDR 显著数。
+
+    机构惯例: 先看因子对未来收益有无预测力(IC), 再看是否稳定(ICIR), 再看是否运气(FDR),
+    全部通过才允许进入组合。返回结构 {factor: {forward_period: calculate_factor_significance 单期结果}}。
+    """
+    report: Dict[str, Dict[int, Dict]] = {}
+    for fp in forward_periods:
+        per_period = calculate_factor_significance(data, factor_names, forward_period=fp)
+        for factor, res in per_period.items():
+            report.setdefault(factor, {})[fp] = res
+    return report
+
+
+def suggest_weights(report: Dict[str, Dict[int, Dict]], forward_period: int = 5,
+                    min_icir: float = 0.3) -> Tuple[Dict[str, float], List[str]]:
+    """按 ICIR 建议因子权重(替代拍脑袋权重)。
+
+    规则:
+      - 只保留 mean_IC > 0 且 ICIR >= min_icir 的因子(有正预测力且稳定);
+      - 权重 ∝ ICIR(越大越可靠权重越高), 归一化;
+      - 显著反向的因子(|ICIR| 达标但 mean_IC < 0)与无效因子一并列入 dropped,
+        报告中可见, 建议反向使用或剔除。
+    返回 (建议权重 dict, 剔除/反向因子列表)。
+    """
+    weights: Dict[str, float] = {}
+    dropped: List[str] = []
+    for factor, per_fp in report.items():
+        r = per_fp.get(forward_period)
+        if not r:
+            dropped.append(factor)
+            continue
+        mean_ic = r.get('mean_ic', 0.0)
+        ic_ir = r.get('ic_ir', 0.0)
+        if mean_ic > 0 and ic_ir >= min_icir:
+            weights[factor] = ic_ir
+        else:
+            dropped.append(factor)
+    total = sum(weights.values())
+    if total <= 0:
+        return {}, dropped
+    return {f: w / total for f, w in weights.items()}, dropped

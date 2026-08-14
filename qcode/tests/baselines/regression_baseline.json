@@ -1,0 +1,60 @@
+{
+  "meta": {
+    "git_hash": "b7fb70b2c82e8e73586b72586918930795ed764c",
+    "generated_at": "2026-08-14T22:50:20",
+    "market_regime": "mixed",
+    "universe": [
+      "600519",
+      "000858",
+      "600036",
+      "601318",
+      "000333",
+      "600887",
+      "601012",
+      "000651",
+      "601901",
+      "600030",
+      "601288",
+      "000625"
+    ],
+    "tolerance": 0.001,
+    "note": "sample 数据基线, 验证代码正确性; 策略有效性需真实数据 + walk-forward"
+  },
+  "strategies": {
+    "momentum": {
+      "final_value": 1076616.78,
+      "max_drawdown_pct": -3.8702,
+      "num_trades": 1105
+    },
+    "mean_reversion": {
+      "final_value": 972158.8,
+      "max_drawdown_pct": -3.3892,
+      "num_trades": 907
+    },
+    "multi_asset": {
+      "final_value": 1238675.07,
+      "max_drawdown_pct": -4.0901,
+      "num_trades": 849
+    },
+    "multi_factor": {
+      "final_value": 1138130.08,
+      "max_drawdown_pct": -2.9519,
+      "num_trades": 1590
+    },
+    "stat_arb": {
+      "final_value": 1157209.46,
+      "max_drawdown_pct": -7.6632,
+      "num_trades": 1033
+    },
+    "regime": {
+      "final_value": 1028227.17,
+      "max_drawdown_pct": -2.0545,
+      "num_trades": 1107
+    },
+    "pairs_trading": {
+      "final_value": 1052044.62,
+      "max_drawdown_pct": -3.3386,
+      "num_trades": 92
+    }
+  }
+}
