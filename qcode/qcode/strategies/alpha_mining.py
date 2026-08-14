@@ -301,8 +301,10 @@ class MarketRegimeStrategy(BaseStrategy):
         df.loc[mask & (df['close'] > df['sma_20'] * 1.02), 'signal'] = 3
 
         # 下跌趋势高波: 反手做空(原逻辑只平仓不反手, 不闭环; 现在做空吃跌)
+        # 反弹过 SMA50 则平空退出(避免 z 字下跌里一直持有空头挨反弹)
         mask = (df['regime'] == 'downtrend_high_vol')
         df.loc[mask, 'signal'] = -1
+        df.loc[mask & (df['close'] > df['sma_50']), 'signal'] = 3
 
         return df
 

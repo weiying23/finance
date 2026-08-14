@@ -104,4 +104,21 @@ class MomentumStrategy(BaseStrategy):
                     confidence=confidence
                 ))
 
+            elif current['signal'] == 0 and previous['signal'] != 0:
+                # 弱趋势退出: 死叉但 ADX<25(不满足做空)或金叉但 RSI 超买, 原持仓无退出信号
+                # → 这里补平仓, 避免弱趋势反转时持仓随波逐流
+                confidence = min(abs(current['rsi'] - 50) / 50, 1.0)
+                if previous['signal'] == 1:
+                    signals.append(Signal(
+                        timestamp=current.name, symbol=symbol,
+                        signal_type=SignalType.CLOSE_LONG, quantity=0, price=current['close'],
+                        confidence=confidence
+                    ))
+                elif previous['signal'] == -1:
+                    signals.append(Signal(
+                        timestamp=current.name, symbol=symbol,
+                        signal_type=SignalType.CLOSE_SHORT, quantity=0, price=current['close'],
+                        confidence=confidence
+                    ))
+
         return signals

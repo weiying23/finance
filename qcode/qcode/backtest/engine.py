@@ -124,6 +124,11 @@ class BacktestEngine:
             borrowing_cost_annual=self.portfolio.borrowing_cost_annual,
             stop_loss_method=self.stop_loss_method, atr_period=self.atr_period,
             atr_mult=self.atr_mult, max_gross=self.max_gross,
+            fee_config={
+                'stamp_tax': self.stamp_tax, 'transfer_fee': self.transfer_fee,
+                'limit_pct_default': self.limit_pct_default,
+                'limit_pct_wide': self.limit_pct_wide, 't_plus_1': self.t_plus_1,
+            },
         )
         for s in self.strategies:
             e.add_strategy(s)
@@ -370,6 +375,29 @@ class BacktestEngine:
 
         return resolved
 
+    def _gross_value(self) -> float:
+        """当前总敞口 = 多头市值 + 空头绝对市值(总杠杆分子)。"""
+        return self.portfolio.get_positions_value()
+
+    def _cap_by_gross(self, position_size: int, price: float) -> int:
+        """按 max_gross 封顶新增股数, 防止 short proceeds 放大组合杠杆(原 2.4x 失控)。"""
+        nav = self.portfolio.get_total_value()
+        if nav <= 0 or price <= 0:
+            return 0
+        max_add_value = self.max_gross * nav - self._gross_value()
+        if max_add_value <= 0:
+            return 0
+        return min(position_size, int(max_add_value / price))
+
+    def _is_t1_blocked(self, position, current_date: pd.Timestamp) -> bool:
+        """T+1: 该持仓是否当日新建(当日不可平)。"""
+        if not self.t_plus_1:
+            return False
+        try:
+            return pd.Timestamp(position.entry_time).normalize() == pd.Timestamp(current_date).normalize()
+        except Exception:
+            return False
+
     def _execute_signal(self, signal, current_price: float):
         """Execute a trading signal with confidence-weighted sizing and split execution"""
         if current_price is None or current_price <= 0:
@@ -390,6 +418,11 @@ class BacktestEngine:
 
             if signal.quantity > 0:
                 position_size = min(position_size, int(signal.quantity))
+
+            # 组合总杠杆封顶(max_gross): 防止 short proceeds 反复放大杠杆
+            position_size = self._cap_by_gross(position_size, execution_price)
+            if position_size <= 0:
+                return
 
             if position_size > 0:
                 trade_value = position_size * execution_price
@@ -428,6 +461,8 @@ class BacktestEngine:
                 portfolio_value, execution_price,
                 confidence=signal.confidence
             )
+            # 组合总杠杆封顶(空头也计入总敞口)
+            position_size = self._cap_by_gross(position_size, execution_price)
             if position_size > 0:
                 self.portfolio.open_position(
                     signal.symbol, position_size, execution_price,
@@ -468,7 +503,8 @@ class BacktestEngine:
     # 卖出类(你收钱, 价格下压): SELL/CLOSE_LONG/OPEN_SHORT/SELL_CALL/SELL_PUT
     _SELL_ACTIONS = {SignalType.SELL, SignalType.CLOSE_LONG, SignalType.OPEN_SHORT,
                      SignalType.SELL_CALL, SignalType.SELL_PUT}
-    # 缴印花税的卖出动作(融券卖出 OPEN_SHORT 法定免印花税, 不在内)
+    # 缴印花税的卖出动作。注: 融券卖出(OPEN_SHORT)按当前税法"暂免"印花税,故排除;
+    # 该政策曾有窗口期变化, 上线前应按当时税法核实(此处默认暂免)。
     _STAMP_ACTIONS = {SignalType.SELL, SignalType.CLOSE_LONG, SignalType.SELL_CALL, SignalType.SELL_PUT}
 
     def _exchange(self, symbol: str) -> str:
@@ -598,7 +634,10 @@ class BacktestEngine:
         mask = gross_series > 0
         if mask.sum() < 20:
             return self.max_gross
-        ret = (pnl[mask] / gross_series[mask]).dropna()
+        # 当日盈亏发生在昨日敞口上 → 用 gross.shift(1) 作分母(原用 gross_t 有 1 日错位)
+        denom = gross_series.shift(1)
+        m = mask & (denom > 0)
+        ret = (pnl[m] / denom[m]).dropna()
         if len(ret) < 20:
             return self.max_gross
         realized_vol = ret.tail(60).std() * np.sqrt(252) if len(ret) >= 60 else ret.std() * np.sqrt(252)
@@ -671,9 +710,6 @@ class BacktestEngine:
             deviation = abs(target - current)
 
             if deviation > self.rebalance_threshold and current_prices[symbol] > 0:
-                # 涨跌停跳过当日再平衡该标的
-                if self._is_limit_blocked(symbol, current_date, current_prices[symbol], SignalType.BUY):
-                    continue
                 price = current_prices[symbol]
                 target_value = target * portfolio_value
                 current_value = current * portfolio_value
@@ -682,7 +718,7 @@ class BacktestEngine:
                 if diff_value > 0:
                     # 净敞口低于目标: 先平空头把净敞口往多头推, 剩余再开多
                     short_pos = self.portfolio.get_position(symbol, position_type='short')
-                    if short_pos:
+                    if short_pos and not self._is_t1_blocked(short_pos, current_date):
                         close_qty = min(int(diff_value / price), int(short_pos.quantity))
                         if close_qty > 0:
                             self.portfolio.close_position(
@@ -690,24 +726,27 @@ class BacktestEngine:
                                 self._apply_costs(price, SignalType.CLOSE_SHORT, symbol),
                                 current_date, position_type='short', asset_type='stock')
                             diff_value -= close_qty * price
-                    add_qty = int(diff_value / price)
-                    if add_qty > 0:
-                        self.portfolio.open_position(
-                            symbol, add_qty,
-                            self._apply_costs(price, SignalType.BUY, symbol),
-                            current_date, position_type='long', asset_type='stock'
-                        )
-                elif diff_value < 0:
-                    pos = self.portfolio.get_position(symbol, position_type='long')
-                    if pos:
-                        reduce_qty = int(abs(diff_value) / current_prices[symbol])
-                        reduce_qty = min(reduce_qty, int(pos.quantity))
-                        if reduce_qty > 0:
-                            self.portfolio.close_position(
-                                symbol, reduce_qty,
-                                self._apply_costs(current_prices[symbol], SignalType.CLOSE_LONG, symbol),
+                    # 开多: 涨停禁买(卖出不受此限); 且受 max_gross 封顶
+                    if not self._is_limit_blocked(symbol, current_date, price, SignalType.BUY):
+                        add_qty = self._cap_by_gross(int(diff_value / price), price)
+                        if add_qty > 0:
+                            self.portfolio.open_position(
+                                symbol, add_qty,
+                                self._apply_costs(price, SignalType.BUY, symbol),
                                 current_date, position_type='long', asset_type='stock'
                             )
+                elif diff_value < 0:
+                    pos = self.portfolio.get_position(symbol, position_type='long')
+                    if pos and not self._is_t1_blocked(pos, current_date):
+                        # 跌停禁卖; 涨停允许卖
+                        if not self._is_limit_blocked(symbol, current_date, price, SignalType.CLOSE_LONG):
+                            reduce_qty = min(int(abs(diff_value) / price), int(pos.quantity))
+                            if reduce_qty > 0:
+                                self.portfolio.close_position(
+                                    symbol, reduce_qty,
+                                    self._apply_costs(price, SignalType.CLOSE_LONG, symbol),
+                                    current_date, position_type='long', asset_type='stock'
+                                )
 
     def _perform_delta_hedge(self, current_date: pd.Timestamp,
                              current_prices: Dict[str, float]):
