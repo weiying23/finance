@@ -1,7 +1,7 @@
 {
   "meta": {
-    "git_hash": "6a4637f63d55a14950e698afb341d7fc52e98c2a",
-    "generated_at": "2026-08-14T23:44:20",
+    "git_hash": "42f0c7a7546573369dc54db1e36ff25427b26900",
+    "generated_at": "2026-08-15T23:08:23",
     "market_regime": "mixed",
     "universe": [
       "600519",
@@ -37,9 +37,9 @@
       "num_trades": 849
     },
     "multi_factor": {
-      "final_value": 1207929.52,
-      "max_drawdown_pct": -3.5685,
-      "num_trades": 1311
+      "final_value": 1249430.42,
+      "max_drawdown_pct": -2.8542,
+      "num_trades": 480
     },
     "stat_arb": {
       "final_value": 1157209.46,
@@ -52,9 +52,14 @@
       "num_trades": 1107
     },
     "pairs_trading": {
-      "final_value": 1052044.62,
-      "max_drawdown_pct": -3.3386,
-      "num_trades": 92
+      "final_value": 1054869.13,
+      "max_drawdown_pct": -3.0794,
+      "num_trades": 85
+    },
+    "cross_sectional": {
+      "final_value": 1186665.87,
+      "max_drawdown_pct": -2.6378,
+      "num_trades": 142
     }
   }
 }

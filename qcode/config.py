@@ -53,11 +53,15 @@ SHORT_CONFIG = {
 }
 
 # Pairs Trading Strategy
+# 配对按真实数据 IC 检验(50只×2019-2023)调整:
+#   600519/000858(茅台/五粮液) IC@20=+0.065 弱正, 保留
+#   600036/601318(招行/平安)   IC@20=-0.058 负(价差不回归反而发散), 2026-08 剔除
+#   000333/600887(美的/伊利)   不在 50 只池, 待补测
 PAIRS_TRADING_STRATEGY = {
     'lookback': 60,
     'entry_zscore': 2.0,
     'exit_zscore': 0.5,
-    'pairs': [('600519', '000858'), ('600036', '601318'), ('000333', '600887')]
+    'pairs': [('600519', '000858'), ('000333', '600887')]
 }
 
 # Walk-Forward Configuration
@@ -101,16 +105,36 @@ MULTI_ASSET_STRATEGY = {
 }
 
 # Alpha Mining Strategies
-# 权重按真实数据 IC 检验(2022-2023, baostock 6只)重配:
-#   value_score       IC@20=+0.162, ICIR=+1.02  ← 唯一强正效因子, 高权重
-#   volatility_score  IC@20=-0.294, ICIR=-1.36  ← 强反向, 权重取负 = 反转使用(高波股票未来跑赢)
-#   momentum_score    IC≈0, volume_score IC≈0   ← 无效, 权重 0
-# 依据: python factor_report.py --real
+# 权重说明(50只×5年 IC 检验后, 2026-08):
+#   新五因子检验结果(50只×2019-2023, FDR 0/48 因样本仍有限但 ICIR 已可靠):
+#     pb_score      IC@20=+0.161, ICIR=+1.07  ← 强正, 估值因子
+#     amihud_score  IC@20=+0.170, ICIR=+1.05  ← 强正, 非流动性溢价
+#     pe_score      IC@20=+0.054, ICIR=+0.32  ← 弱正
+#     reversal/volume/turnover/旧因子          ← 弱或无效
+#   故权重: pb 0.47 / amihud 0.39 / pe 0.14, 其余 0(suggest_weights @20 建议)。
+#   注: 6只×2022-2023 曾测出 value/volatility 强 IC, 被 50只×5年 证明为假阳性——
+#   一切以大数据长时段为准。
+# 依据: python factor_report.py --real --start 2019-01-01 --end 2023-12-31
 MULTI_FACTOR_ALPHA = {
     'momentum_weight': 0.0,
-    'value_weight': 0.6,
-    'volatility_weight': -0.4,
-    'volume_weight': 0.0
+    'value_weight': 0.0,
+    'volatility_weight': 0.0,
+    'volume_weight': 0.0,
+    'turnover_weight': 0.0,
+    'reversal_weight': 0.0,
+    'amihud_weight': 0.39,
+    'pb_weight': 0.47,
+    'pe_weight': 0.14
+}
+
+# Cross-Sectional 月度截面选股(Phase 3 第一步)
+# 与 multi_factor 的区别: 排名选 top-N 而非阈值; 月频调仓(匹配 IC@20)而非日频;
+# 只做多不做空; 行业中性(每行业最多 max_per_industry 只)。factor_weights 缺省用 MULTI_FACTOR_ALPHA。
+CROSS_SECTIONAL_CONFIG = {
+    'top_n': 10,
+    'max_per_industry': 2,
+    'min_data_days': 120,
+    'factor_weights': None,   # None = 复用 MULTI_FACTOR_ALPHA
 }
 
 STATISTICAL_ARBITRAGE = {

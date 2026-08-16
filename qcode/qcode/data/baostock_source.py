@@ -63,7 +63,7 @@ class BaostockDataSource(DataSource):
             ed = _normalize_date(end_date)
             rs = bs.query_history_k_data_plus(
                 code,
-                "date,open,high,low,close,volume,amount,turn,pctChg",
+                "date,open,high,low,close,volume,amount,turn,pctChg,peTTM,pbMRQ",
                 start_date=sd, end_date=ed, frequency='d', adjustflag='2'
             )
             rows = []
@@ -73,10 +73,12 @@ class BaostockDataSource(DataSource):
                 return pd.DataFrame()
             df = pd.DataFrame(rows, columns=rs.fields)
             df['date'] = pd.to_datetime(df['date'])
-            for col in ['open', 'high', 'low', 'close', 'volume', 'amount', 'turn', 'pctChg']:
+            for col in ['open', 'high', 'low', 'close', 'volume', 'amount', 'turn', 'pctChg',
+                        'peTTM', 'pbMRQ']:
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors='coerce')
-            df = df.rename(columns={'turn': 'turnover', 'pctChg': 'pct_change'})
+            df = df.rename(columns={'turn': 'turnover', 'pctChg': 'pct_change',
+                                    'peTTM': 'pe_ttm', 'pbMRQ': 'pb'})
             df['symbol'] = symbol
             df['change'] = df['close'].diff()
             df['amplitude'] = np.nan

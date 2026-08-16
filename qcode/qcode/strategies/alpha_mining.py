@@ -8,18 +8,46 @@ from qcode.strategies.base import BaseStrategy, Signal, SignalType
 
 
 class MultiFactorAlpha(BaseStrategy):
-    """Multi-factor alpha mining strategy combining multiple signals"""
+    """Multi-factor alpha mining strategy combining multiple signals
+
+    因子清单(权重在 config.MULTI_FACTOR_ALPHA, 未启用因子权重置 0):
+      旧四因子: momentum / value(价格-60日均线反转) / volatility(低波) / volume(量)
+      新五因子(2026-08, 50只×5年 IC 检验后加入):
+        turnover    换手率(低换手=冷门反转)         数据: baostock turn
+        reversal    250日长期反转(年度反转效应)      数据: close
+        amihud      非流动性(Amihud |收益|/成交额)  数据: close+amount
+        pb          -log(PB), 越便宜越高分          数据: baostock pbMRQ
+        pe          -log(PE, 仅正值), 越便宜越高分   数据: baostock peTTM
+    """
 
     def __init__(self, name: str = "MultiFactorAlpha",
                  momentum_weight: float = 0.3,
                  value_weight: float = 0.3,
                  volatility_weight: float = 0.2,
-                 volume_weight: float = 0.2):
+                 volume_weight: float = 0.2,
+                 turnover_weight: float = 0.0,
+                 reversal_weight: float = 0.0,
+                 amihud_weight: float = 0.0,
+                 pb_weight: float = 0.0,
+                 pe_weight: float = 0.0,
+                 roe_weight: float = 0.0,
+                 gp_margin_weight: float = 0.0,
+                 debt_ratio_weight: float = 0.0,
+                 yoy_ni_weight: float = 0.0):
         params = {
             'momentum_weight': momentum_weight,
             'value_weight': value_weight,
             'volatility_weight': volatility_weight,
             'volume_weight': volume_weight,
+            'turnover_weight': turnover_weight,
+            'reversal_weight': reversal_weight,
+            'amihud_weight': amihud_weight,
+            'pb_weight': pb_weight,
+            'pe_weight': pe_weight,
+            'roe_weight': roe_weight,
+            'gp_margin_weight': gp_margin_weight,
+            'debt_ratio_weight': debt_ratio_weight,
+            'yoy_ni_weight': yoy_ni_weight,
             'lookback_short': 5,
             'lookback_medium': 20,
             'lookback_long': 60
@@ -48,8 +76,60 @@ class MultiFactorAlpha(BaseStrategy):
         df['volume_ma'] = df['volume'].rolling(20).mean()
         df['volume_score'] = (df['volume'] - df['volume_ma']) / df['volume_ma']
 
-        for col in ['momentum_score', 'value_score', 'volume_score']:
-            if df[col].std() > 0:
+        # --- 新因子(2026-08) ---
+        # 换手率: 20日均换手, 低换手=冷门(方向由 IC 检验决定)
+        if 'turnover' in df.columns:
+            df['turnover_score'] = df['turnover'].rolling(20).mean()
+        else:
+            df['turnover_score'] = np.nan
+
+        # 250日长期反转: 过去一年涨幅取负(涨太多=低分, A股年度反转效应)
+        df['reversal_score'] = -df['close'].pct_change(250)
+
+        # Amihud 非流动性: 60日均值(|日收益|/成交额), 大=流动性差
+        if 'amount' in df.columns and df['amount'].notna().any() and (df['amount'].fillna(0) > 0).any():
+            amihud = (df['close'].pct_change().abs() / df['amount'].replace(0, np.nan))
+            df['amihud_score'] = amihud.rolling(60).mean()
+        else:
+            df['amihud_score'] = np.nan
+
+        # PB / PE: 负值/缺失 → NaN(亏损股无 PE; log 只对正值有意义)
+        if 'pb' in df.columns:
+            df['pb_score'] = -np.log(df['pb'].where(df['pb'] > 0))
+        else:
+            df['pb_score'] = np.nan
+        if 'pe_ttm' in df.columns:
+            df['pe_score'] = -np.log(df['pe_ttm'].where(df['pe_ttm'] > 0))
+        else:
+            df['pe_score'] = np.nan
+
+        # --- 质量因子(2026-08, baostock 年报, pubDate 时点对齐后由 fundamental.py 注入) ---
+        # roe/gp_margin/yoy_ni 越高越好; debt_ratio(资产负债率)越低越好 → 取负
+        if 'roe' in df.columns:
+            df['roe_score'] = df['roe']
+        else:
+            df['roe_score'] = np.nan
+        if 'gp_margin' in df.columns:
+            df['gp_margin_score'] = df['gp_margin']
+        else:
+            df['gp_margin_score'] = np.nan
+        if 'debt_ratio' in df.columns:
+            df['debt_ratio_score'] = -df['debt_ratio']
+        else:
+            df['debt_ratio_score'] = np.nan
+        if 'yoy_ni' in df.columns:
+            df['yoy_ni_score'] = df['yoy_ni']
+        else:
+            df['yoy_ni_score'] = np.nan
+
+        for col in ['momentum_score', 'value_score', 'volume_score',
+                    'turnover_score', 'reversal_score', 'amihud_score', 'pb_score', 'pe_score',
+                    'roe_score', 'gp_margin_score', 'debt_ratio_score', 'yoy_ni_score']:
+            if col not in df.columns:
+                continue
+            # std > 1e-12 才归一化: 近常数列(如长期不变的 pb)因浮点噪声 std≈1e-16,
+            # 若按 std>0 判断会被误归一化并用 1e-16 做分母放大成野值
+            if df[col].std() > 1e-12:
                 df[col] = (df[col] - df[col].mean()) / df[col].std()
                 df[col] = df[col].clip(-2, 2) / 2
 
@@ -57,7 +137,16 @@ class MultiFactorAlpha(BaseStrategy):
             df['momentum_score'] * self.params['momentum_weight'] +
             df['value_score'] * self.params['value_weight'] +
             df['volatility_score'] * self.params['volatility_weight'] +
-            df['volume_score'] * self.params['volume_weight']
+            df['volume_score'] * self.params['volume_weight'] +
+            df['turnover_score'].fillna(0) * self.params['turnover_weight'] +
+            df['reversal_score'].fillna(0) * self.params['reversal_weight'] +
+            df['amihud_score'].fillna(0) * self.params['amihud_weight'] +
+            df['pb_score'].fillna(0) * self.params['pb_weight'] +
+            df['pe_score'].fillna(0) * self.params['pe_weight'] +
+            df['roe_score'].fillna(0) * self.params['roe_weight'] +
+            df['gp_margin_score'].fillna(0) * self.params['gp_margin_weight'] +
+            df['debt_ratio_score'].fillna(0) * self.params['debt_ratio_weight'] +
+            df['yoy_ni_score'].fillna(0) * self.params['yoy_ni_weight']
         )
 
         df['position'] = 0

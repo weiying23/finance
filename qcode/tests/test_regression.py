@@ -26,6 +26,7 @@ from qcode.strategies.mean_reversion import MeanReversionStrategy
 from qcode.strategies.multi_asset import MultiAssetStrategy
 from qcode.strategies.alpha_mining import MultiFactorAlpha, StatisticalArbitrage, MarketRegimeStrategy
 from qcode.strategies.pairs_trading import PairsTradingStrategy
+from qcode.strategies.cross_sectional import CrossSectionalStrategy
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # qcode/
 REPO_DIR = os.path.dirname(BASE_DIR)                                     # finance/ (git root)
@@ -35,7 +36,7 @@ BASELINE = os.path.join(BASE_DIR, 'tests', 'baselines', 'regression_baseline.jso
 from config import (BACKTEST_CONFIG, RISK_CONFIG, PORTFOLIO_OPTIMIZATION, EXECUTION_CONFIG,
                     SHORT_CONFIG, FEE_CONFIG, MOMENTUM_STRATEGY, MEAN_REVERSION_STRATEGY,
                     MULTI_ASSET_STRATEGY, MULTI_FACTOR_ALPHA, STATISTICAL_ARBITRAGE,
-                    MARKET_REGIME_STRATEGY, PAIRS_TRADING_STRATEGY)
+                    MARKET_REGIME_STRATEGY, PAIRS_TRADING_STRATEGY, CROSS_SECTIONAL_CONFIG)
 
 SYMBOLS = ['600519', '000858', '600036', '601318', '000333', '600887',
            '601012', '000651', '601901', '600030', '601288', '000625']
@@ -81,6 +82,7 @@ def build_strategies():
         'stat_arb': StatisticalArbitrage(**STATISTICAL_ARBITRAGE),
         'regime': MarketRegimeStrategy(**MARKET_REGIME_STRATEGY),
         'pairs_trading': PairsTradingStrategy(**PAIRS_TRADING_STRATEGY),
+        'cross_sectional': CrossSectionalStrategy(**{**CROSS_SECTIONAL_CONFIG, 'factor_weights': MULTI_FACTOR_ALPHA}),
     }
 
 

@@ -80,12 +80,17 @@ def calculate_factor_significance(data: Dict[str, pd.DataFrame],
                 continue
 
             ic = calculate_ic(symbol_data[factor], symbol_data['forward_return'])
-            ic_values.append(ic)
+            if pd.notna(ic):  # 常数列(如年报因子年内不变)corr 返回 NaN, 过滤避免污染均值
+                ic_values.append(ic)
 
             from scipy.stats import pearsonr
             if len(symbol_data[factor]) > 2 and len(symbol_data['forward_return']) > 2:
-                _, p = pearsonr(symbol_data[factor], symbol_data['forward_return'])
-                p_values.append(p)
+                try:
+                    _, p = pearsonr(symbol_data[factor], symbol_data['forward_return'])
+                    if pd.notna(p):
+                        p_values.append(p)
+                except Exception:
+                    pass
 
         mean_ic = np.mean(ic_values) if ic_values else 0
         ic_std = np.std(ic_values) if len(ic_values) > 1 else 0

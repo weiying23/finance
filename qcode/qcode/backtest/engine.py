@@ -37,7 +37,8 @@ class BacktestEngine:
                  atr_period: int = 14,
                  atr_mult: float = 2.5,
                  max_gross: float = 1.0,
-                 fee_config: dict = None):
+                 fee_config: dict = None,
+                 preroll_days: int = 0):
         self.initial_capital = initial_capital
         self.commission = commission
         self.slippage = slippage
@@ -54,6 +55,10 @@ class BacktestEngine:
         self.max_gross = max_gross
         self.shrinkage_alpha = shrinkage_alpha
         self.max_weight = max_weight
+        # 预热窗口: load_data 提前 preroll_days 拉数据(热身指标), run() 自动从原始起点计收益
+        self.preroll_days = preroll_days
+        self._requested_start: Optional[str] = None
+        self._run_start: Optional[str] = None
         fc = fee_config or {}
         self.stamp_tax = fc.get('stamp_tax', 0.0)
         self.transfer_fee = fc.get('transfer_fee', 0.0)
@@ -83,9 +88,18 @@ class BacktestEngine:
         self.strategies.append(strategy)
 
     def load_data(self, symbols: List[str], start_date: str, end_date: str):
-        """Load market data for backtesting"""
+        """Load market data for backtesting.
+
+        若配置了 preroll_days, 实际拉取窗口前移(指标热身), 但回测起点的过滤由
+        run(start_date=...) 或 self._requested_start 保证(预热区不计收益)。
+        """
+        self._requested_start = start_date
+        fetch_start = start_date
+        if self.preroll_days > 0 and start_date:
+            fetch_start = (pd.Timestamp(start_date) - pd.Timedelta(days=self.preroll_days)).strftime('%Y-%m-%d')
+            print(f"预热窗口: 数据自 {fetch_start} 起拉取, 回测自 {start_date} 起计")
         print(f"Loading data for {len(symbols)} symbols...")
-        self.market_data = self.data_fetcher.get_multiple_stocks(symbols, start_date, end_date)
+        self.market_data = self.data_fetcher.get_multiple_stocks(symbols, fetch_start, end_date)
         print(f"Loaded data for {len(self.market_data)} symbols")
 
     def run(self, start_date: Optional[str] = None, end_date: Optional[str] = None) -> Dict:
@@ -94,6 +108,11 @@ class BacktestEngine:
             raise ValueError("No market data loaded. Call load_data() first.")
         if not self.strategies:
             raise ValueError("No strategies added. Call add_strategy() first.")
+
+        # 预热: 若调用方未显式传 start_date, 用 load_data 的原始起点, 保证预热区不计收益
+        if start_date is None and self.preroll_days > 0 and self._requested_start:
+            start_date = self._requested_start
+        self._run_start = start_date
 
         all_dates = self._get_trading_dates(start_date, end_date)
 
@@ -129,6 +148,7 @@ class BacktestEngine:
                 'limit_pct_default': self.limit_pct_default,
                 'limit_pct_wide': self.limit_pct_wide, 't_plus_1': self.t_plus_1,
             },
+            preroll_days=self.preroll_days,
         )
         for s in self.strategies:
             e.add_strategy(s)
@@ -415,6 +435,10 @@ class BacktestEngine:
                 portfolio_value, execution_price,
                 confidence=signal.confidence
             )
+
+            # 等权开仓: 信号 metadata 带 weight 时, 按 组合净值×weight/价格 定仓(截面选股用)
+            if signal.metadata and signal.metadata.get('weight'):
+                position_size = int(portfolio_value * signal.metadata['weight'] / execution_price)
 
             if signal.quantity > 0:
                 position_size = min(position_size, int(signal.quantity))
@@ -946,10 +970,12 @@ class BacktestEngine:
         if not self.market_data:
             return None
         try:
-            all_dates = self._get_trading_dates(None, None)
-            if not all_dates:
-                return None
-            start, end = all_dates[0], all_dates[-1]
+            # 用回测实际起点(预热区不算基准), 与净值曲线口径一致
+            if self._run_start:
+                start = pd.Timestamp(self._run_start)
+            else:
+                start = self._get_trading_dates(None, None)[0]
+            end = self._get_trading_dates(None, None)[-1]
             rets = []
             for symbol, df in self.market_data.items():
                 seg = df[(df.index >= start) & (df.index <= end)]['close']

@@ -8,19 +8,20 @@ from qcode.strategies.mean_reversion import MeanReversionStrategy
 from qcode.strategies.multi_asset import MultiAssetStrategy
 from qcode.strategies.alpha_mining import MultiFactorAlpha, StatisticalArbitrage, MarketRegimeStrategy
 from qcode.strategies.pairs_trading import PairsTradingStrategy
+from qcode.strategies.cross_sectional import CrossSectionalStrategy
 from config import (
     BACKTEST_CONFIG, RISK_CONFIG, STOCK_UNIVERSE, BACKTEST_PERIOD,
     MOMENTUM_STRATEGY, MEAN_REVERSION_STRATEGY, MULTI_ASSET_STRATEGY,
     MULTI_FACTOR_ALPHA, STATISTICAL_ARBITRAGE, MARKET_REGIME_STRATEGY,
     PORTFOLIO_OPTIMIZATION, EXECUTION_CONFIG, PAIRS_TRADING_STRATEGY,
-    WALK_FORWARD_CONFIG, SHORT_CONFIG, FEE_CONFIG
+    WALK_FORWARD_CONFIG, SHORT_CONFIG, FEE_CONFIG, CROSS_SECTIONAL_CONFIG
 )
 
 
 def run_backtest(strategy_name: str, symbols: list, start_date: str, end_date: str,
                 initial_capital: float, enable_hedging: bool = None,
                 use_sample_data: bool = False, walk_forward: bool = False,
-                market_regime: str = 'bear'):
+                market_regime: str = 'bear', preroll_days: int = 0):
     """Run backtest with specified strategy"""
 
     if enable_hedging is None:
@@ -37,6 +38,11 @@ def run_backtest(strategy_name: str, symbols: list, start_date: str, end_date: s
     print(f"Position Method: {PORTFOLIO_OPTIMIZATION['method']}")
     print("="*70 + "\n")
 
+    # 预热窗口(引擎级): 提前拉取历史让指标热身, 回测仍从 start_date 计。
+    # 实测: cross_sectional 无预热首仓拖到 2019-07(+5%), 预热后回到 2019-01(+36.7%)。
+    # sample 模式无需预热(合成数据, 且保持测试行为稳定)。
+    if use_sample_data:
+        preroll_days = 0
     engine = BacktestEngine(
         initial_capital=initial_capital,
         commission=BACKTEST_CONFIG['commission'],
@@ -60,7 +66,8 @@ def run_backtest(strategy_name: str, symbols: list, start_date: str, end_date: s
         atr_period=RISK_CONFIG.get('atr_period', 14),
         atr_mult=RISK_CONFIG.get('atr_mult', 2.5),
         max_gross=RISK_CONFIG.get('max_gross', 1.0),
-        fee_config=FEE_CONFIG
+        fee_config=FEE_CONFIG,
+        preroll_days=preroll_days
     )
 
     if strategy_name.lower() == 'momentum':
@@ -89,6 +96,17 @@ def run_backtest(strategy_name: str, symbols: list, start_date: str, end_date: s
 
     elif strategy_name.lower() == 'pairs_trading' or strategy_name.lower() == 'pairs':
         strategy = PairsTradingStrategy(name="PairsTrading", **PAIRS_TRADING_STRATEGY)
+        engine.add_strategy(strategy)
+
+    elif strategy_name.lower() in ('cross_sectional', 'cross'):
+        # 月度截面选股: 真实数据用 baostock 行业映射做行业中性; sample 数据跳过(无网络)
+        industry_map = None
+        if not use_sample_data:
+            from qcode.data.industry import load_industry_map
+            industry_map = load_industry_map()
+        cfg = dict(CROSS_SECTIONAL_CONFIG)
+        cfg['factor_weights'] = cfg.get('factor_weights') or MULTI_FACTOR_ALPHA
+        strategy = CrossSectionalStrategy(name="CrossSectional", industry_map=industry_map, **cfg)
         engine.add_strategy(strategy)
 
     elif strategy_name.lower() == 'alpha_all':
@@ -130,7 +148,7 @@ def run_backtest(strategy_name: str, symbols: list, start_date: str, end_date: s
                 print(f"    Return: {metrics.get('total_return_pct', 0):.2f}%")
                 print(f"    Sharpe: {metrics.get('sharpe_ratio', 0):.2f}")
     else:
-        results = engine.run()
+        results = engine.run(start_date=start_date, end_date=end_date)
         engine.print_summary()
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -173,7 +191,7 @@ Examples:
         type=str,
         default='momentum',
         choices=['momentum', 'mean_reversion', 'multi_asset', 'multi_factor',
-                 'stat_arb', 'regime', 'pairs_trading', 'all', 'alpha_all'],
+                 'stat_arb', 'regime', 'pairs_trading', 'cross_sectional', 'all', 'alpha_all'],
         help='Trading strategy to use'
     )
 
@@ -232,6 +250,13 @@ Examples:
         help='Run walk-forward segmented backtest'
     )
 
+    parser.add_argument(
+        '--preroll-days',
+        type=int,
+        default=365,
+        help='预热窗口天数: 提前拉取历史热身指标, 回测仍从 --start 计收益(默认 365, sample 模式自动关闭)'
+    )
+
     args = parser.parse_args()
 
     symbols = args.symbols if args.symbols else STOCK_UNIVERSE
@@ -246,7 +271,8 @@ Examples:
         enable_hedging=enable_hedging,
         use_sample_data=args.sample_data,
         walk_forward=args.walk_forward,
-        market_regime=args.market_regime
+        market_regime=args.market_regime,
+        preroll_days=args.preroll_days
     )
 
 
